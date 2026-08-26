@@ -43,12 +43,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The binary consumes an existing Istanbul `coverage-final.json` artifact and
-accepts one or more TypeScript source files or directories:
+accepts one or more TypeScript source files or project-relative source roots.
+Sources can be positional or supplied repeatedly with `--source` (also
+available as `--source-root`):
 
 ```sh
 cargo run -p crap4ts -- --help
 cargo run -p crap4ts -- --coverage coverage-final.json src --format text
 cargo run -p crap4ts -- --coverage coverage-final.json src --format json --threshold 8
+cargo run -p crap4ts -- --coverage coverage-final.json --source src --source lib
 ```
 
 Exit status `0` means the quality gate passed, `1` means invalid input or
@@ -56,11 +59,19 @@ analysis failure, and `2` means a score strictly exceeded the configured
 threshold. JSON stdout contains only the versioned report; diagnostics and
 quality-gate messages use stderr.
 
-Source discovery accepts only project-local TypeScript identities, skips
-declaration and conventional test files, and rejects symlinked directories.
-Coverage entries must use the same canonical project-relative identity (or an
-absolute path inside `--project-root`); basename and unrelated-path guesses
-are rejected.
+Source discovery accepts only project-local TypeScript identities, supports
+`.ts`/`.tsx` (and TypeScript module variants), skips declaration files,
+conventional test files, dependency/build/coverage directories, and rejects
+symlinked directories. Explicit source paths must exist and be readable;
+missing, unreadable, unsupported, or excluded files fail with a
+source-selection error, while an empty directory selection fails with a
+configuration error. Absolute paths are allowed only when they resolve inside
+`--project-root`; parent traversal and symlink escape attempts are rejected.
+Each selected directory is also a traversal boundary. Paths are normalized to
+`/` only after filesystem resolution, so POSIX and Windows separators produce
+the same project-relative identity. Coverage entries must use that identity
+(or an absolute path inside `--project-root`); basename and unrelated-path
+guesses are rejected.
 
 ## License
 
