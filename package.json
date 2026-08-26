@@ -23,7 +23,7 @@
     "release:gate": "node scripts/release-gate.js",
     "local-release": "node scripts/local-release.js",
     "test:npm": "npm run test --workspace packages/crap4ts",
-    "test": "npm run check:versions && npm run check:schemas && npm run test:npm && node --test scripts/*.test.js"
+    "test": "npm run check:versions && npm run check:schemas && npm run test:npm && node --test scripts/check-versions.test.js scripts/local-release.test.js scripts/npm-command.test.js scripts/publication-plan.test.js"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
