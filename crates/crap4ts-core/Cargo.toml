@@ -1,0 +1,18 @@
+[package]
+name = "crap4ts-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Domain model and adapters for the crap4ts quality gate"
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
