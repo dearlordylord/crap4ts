@@ -5,8 +5,8 @@ use std::{cmp::Ordering, collections::BTreeMap, path::Path};
 use crate::{
     coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
     domain::{
-        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportRow,
-        SourceFile,
+        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, GroupName, GroupRoot,
+        Report, ReportGroup, ReportRow, SourceFile,
     },
     source,
 };
@@ -18,6 +18,16 @@ pub fn crap_score(complexity: Complexity, coverage: f64) -> Result<f64, CoreErro
     }
     let cc = f64::from(complexity.get());
     Ok(cc * cc * (1.0 - coverage).powi(3) + cc)
+}
+
+/// Validate the source-analysis boundary without requiring coverage evidence.
+/// The CLI uses this during package-group preflight so syntax failures in a
+/// later group cannot trigger generation side effects for an earlier group.
+pub fn validate_sources(sources: &[SourceFile]) -> Result<(), CoreError> {
+    for source_file in sources {
+        source::analyze_source(&source_file.path, &source_file.source)?;
+    }
+    Ok(())
 }
 
 /// Threshold policy used by the application quality gate.
@@ -196,6 +206,7 @@ pub fn analyze_with_adapter_and_policy(
         });
         rows.push(ReportRow {
             id: unit.id.clone(),
+            group: None,
             path: unit.path.clone(),
             name: unit.name.clone(),
             kind: unit.kind,
@@ -231,10 +242,146 @@ pub fn analyze_with_adapter_and_policy(
     });
     Ok(Report {
         version: crate::domain::REPORT_VERSION,
-        threshold: policy.global(),
+        threshold: Some(policy.global()),
         rows,
         diagnostics,
+        groups: Vec::new(),
     })
+}
+
+/// A completed package analysis awaiting aggregate assembly.
+///
+/// The CLI constructs one of these only after source selection, coverage
+/// acquisition, parsing, attribution, and scoring have all succeeded. This
+/// makes aggregate rendering an all-or-nothing operation: a later package
+/// failure can never expose an earlier package's report.
+#[derive(Clone, Debug)]
+pub struct PackageReport {
+    pub name: GroupName,
+    /// Repository-root-relative package root ("." for the root itself).
+    pub root: GroupRoot,
+    pub policy: ThresholdPolicy,
+    pub report_only: bool,
+    pub report: Report,
+}
+
+/// Assemble completed package reports into the deterministic version-2
+/// aggregate document. Rows retain their local source ranges and coverage,
+/// while path and id identities are qualified with the package root/name so
+/// same-named functions in different packages cannot collide.
+pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, CoreError> {
+    packages.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.root.cmp(&right.root))
+    });
+
+    for pair in packages.windows(2) {
+        if pair[0].name == pair[1].name {
+            return Err(CoreError::InvalidAggregateIdentity(format!(
+                "duplicate package group name '{}'",
+                pair[0].name
+            )));
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut groups = Vec::with_capacity(packages.len());
+    for package in packages {
+        let PackageReport {
+            name,
+            root,
+            policy,
+            report_only,
+            mut report,
+        } = package;
+        let local_root = if root.as_str() == "." {
+            String::new()
+        } else {
+            root.as_str().to_string()
+        };
+        for mut row in report.rows.drain(..) {
+            let local_path = row.path.clone();
+            let suffix = validate_local_row_id(&name, &local_path, &row.id)?;
+            let qualified_path = if local_root.is_empty() {
+                local_path.to_string()
+            } else {
+                format!("{local_root}/{}", local_path.as_str())
+            };
+            // Both the group root and local row path are validated values,
+            // but the public aggregate boundary still validates their
+            // composition before changing either identity. Never leave a
+            // local path beside a repository-qualified id on failure.
+            row.path =
+                crate::domain::ProjectRelativePath::new(&qualified_path).map_err(|error| {
+                    CoreError::InvalidAggregateIdentity(format!(
+                        "group '{}' composed invalid row path '{}': {error}",
+                        name, qualified_path
+                    ))
+                })?;
+            row.id = format!("{name}::{qualified_path}::{suffix}");
+            row.group = Some(name.to_string());
+            rows.push(row);
+        }
+        diagnostics.extend(
+            report
+                .diagnostics
+                .drain(..)
+                .map(|diagnostic| diagnostic.with_group(name.to_string())),
+        );
+        groups.push(ReportGroup {
+            name,
+            root,
+            threshold: policy.global(),
+            report_only,
+            threshold_overrides: policy.path_overrides().clone(),
+        });
+    }
+
+    rows.sort_by(compare_rows);
+    diagnostics.sort_by(compare_diagnostics);
+    Ok(Report {
+        version: crate::domain::AGGREGATE_REPORT_VERSION,
+        threshold: None,
+        rows,
+        diagnostics,
+        groups,
+    })
+}
+
+/// Validate the local portion of a report-row identity before adding the
+/// package-group qualification.  The separator is part of the identity
+/// grammar: accepting only the path prefix would turn `src/file.tsx::f` into
+/// a seemingly valid `src/file.ts` identity.  The remaining function identity
+/// is intentionally opaque (names may contain punctuation), but it must be
+/// non-empty and printable.
+fn validate_local_row_id<'a>(
+    group: &GroupName,
+    path: &crate::domain::ProjectRelativePath,
+    id: &'a str,
+) -> Result<&'a str, CoreError> {
+    let prefix = format!("{}::", path.as_str());
+    let suffix = id.strip_prefix(&prefix).ok_or_else(|| {
+        CoreError::InvalidAggregateIdentity(format!(
+            "group '{}' row path '{}' has id '{}'; expected id prefix '{}'",
+            group, path, id, prefix
+        ))
+    })?;
+    if suffix.is_empty() || suffix.chars().any(char::is_control) {
+        return Err(CoreError::InvalidAggregateIdentity(format!(
+            "group '{}' row path '{}' has malformed id '{}'; expected a non-empty function identity after '{}'",
+            group, path, id, prefix
+        )));
+    }
+    Ok(suffix)
+}
+
+fn compare_diagnostics(left: &Diagnostic, right: &Diagnostic) -> Ordering {
+    left.group
+        .cmp(&right.group)
+        .then_with(|| left.category.cmp(&right.category))
+        .then_with(|| left.message.cmp(&right.message))
 }
 
 /// Analyze an artifact after selecting its coverage format.
@@ -256,10 +403,12 @@ pub fn analyze_with_root_and_format(
 }
 
 fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
+    let group_order = || left.group.cmp(&right.group);
     match (left.crap, right.crap) {
         (Some(left_score), Some(right_score)) => right_score
             .partial_cmp(&left_score)
             .unwrap_or(Ordering::Equal)
+            .then_with(group_order)
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
@@ -269,8 +418,9 @@ fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => left
-            .path
-            .cmp(&right.path)
+            .group
+            .cmp(&right.group)
+            .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
             .then_with(|| left.name.cmp(&right.name))
@@ -299,6 +449,7 @@ mod tests {
         };
         ReportRow {
             id: format!("{path}::f"),
+            group: None,
             path,
             name: "f".to_string(),
             kind: crate::domain::FunctionKind::FunctionDeclaration,
@@ -343,5 +494,117 @@ mod tests {
         assert_eq!(policy.threshold_for(&other), 8);
         assert!(!policy.gate_breached_rows(&[row("src/a.ts", Some(1.0))]));
         assert!(policy.gate_breached_rows(&[row("src/a.ts", Some(1.000_001))]));
+    }
+
+    #[test]
+    fn aggregate_reports_qualify_repository_identity_and_sort_groups() {
+        let first = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: Some(8),
+            rows: vec![row("src/file.ts", Some(2.0))],
+            diagnostics: vec![Diagnostic::new(
+                DiagnosticCategory::CoverageAttribution,
+                "stale coverage",
+            )],
+            groups: Vec::new(),
+        };
+        let second = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: Some(8),
+            rows: vec![row("src/file.ts", Some(2.0))],
+            diagnostics: Vec::new(),
+            groups: Vec::new(),
+        };
+        let report = aggregate_reports(vec![
+            PackageReport {
+                name: GroupName::new("z").unwrap(),
+                root: GroupRoot::new("packages/z").unwrap(),
+                policy: ThresholdPolicy::new(8),
+                report_only: false,
+                report: first,
+            },
+            PackageReport {
+                name: GroupName::new("a").unwrap(),
+                root: GroupRoot::new("packages/a").unwrap(),
+                policy: ThresholdPolicy::new(8),
+                report_only: false,
+                report: second,
+            },
+        ])
+        .unwrap();
+        assert_eq!(report.version, crate::domain::AGGREGATE_REPORT_VERSION);
+        assert_eq!(report.threshold, None);
+        assert_eq!(
+            report
+                .groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(report.rows[0].group.as_deref(), Some("a"));
+        assert_eq!(report.rows[0].path.as_str(), "packages/a/src/file.ts");
+        assert_eq!(report.rows[0].id, "a::packages/a/src/file.ts::f");
+        assert_eq!(report.diagnostics[0].group.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn aggregate_reports_rejects_duplicate_validated_group_names() {
+        let report = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: Some(8),
+            rows: Vec::new(),
+            diagnostics: Vec::new(),
+            groups: Vec::new(),
+        };
+        let package = |root: &str| PackageReport {
+            name: GroupName::new("core").unwrap(),
+            root: GroupRoot::new(root).unwrap(),
+            policy: ThresholdPolicy::new(8),
+            report_only: false,
+            report: report.clone(),
+        };
+        assert!(matches!(
+            aggregate_reports(vec![package("packages/core-a"), package("packages/core-b")]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn aggregate_reports_rejects_inconsistent_and_prefix_collision_row_ids() {
+        let package = |row: ReportRow| PackageReport {
+            name: GroupName::new("core").unwrap(),
+            root: GroupRoot::new("packages/core").unwrap(),
+            policy: ThresholdPolicy::new(8),
+            report_only: false,
+            report: crate::domain::Report {
+                version: crate::domain::REPORT_VERSION,
+                threshold: Some(8),
+                rows: vec![row],
+                diagnostics: Vec::new(),
+                groups: Vec::new(),
+            },
+        };
+
+        let mut wrong = row("src/f.ts", Some(1.0));
+        wrong.id = "wrong".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(wrong)]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+
+        let mut prefix_collision = row("src/f.ts", Some(1.0));
+        prefix_collision.id = "src/f.tsx::f".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(prefix_collision)]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+
+        let mut missing_function_identity = row("src/f.ts", Some(1.0));
+        missing_function_identity.id = "src/f.ts::".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(missing_function_identity)]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
     }
 }

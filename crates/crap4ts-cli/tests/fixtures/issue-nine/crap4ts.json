@@ -1,0 +1,23 @@
+{
+  "format": "json",
+  "groups": {
+    "istanbul": {
+      "root": "packages/istanbul",
+      "sources": ["src"],
+      "coverage": {
+        "path": "coverage-final.json",
+        "format": "istanbul"
+      },
+      "threshold": 1
+    },
+    "lcov": {
+      "root": "packages/lcov",
+      "sources": ["src"],
+      "coverage": {
+        "path": "lcov.info",
+        "format": "lcov"
+      },
+      "threshold": 1
+    }
+  }
+}

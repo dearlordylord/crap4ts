@@ -53,6 +53,76 @@ impl Drop for Fixture {
     }
 }
 
+struct MixedFixture {
+    root: PathBuf,
+}
+
+impl MixedFixture {
+    fn new() -> Self {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("crap4ts-cli-mixed-{}-{id}", std::process::id()));
+        fs::create_dir_all(root.join("packages/istanbul/src")).expect("create Istanbul package");
+        fs::create_dir_all(root.join("packages/lcov/src")).expect("create LCOV package");
+        let istanbul_source = root.join("packages/istanbul/src/fixture.ts");
+        let lcov_source = root.join("packages/lcov/src/fixture.ts");
+        fs::write(
+            &istanbul_source,
+            "function greet(name: string) { return name; }\n",
+        )
+        .expect("write Istanbul source");
+        fs::write(
+            &lcov_source,
+            "function greet(name: string) { return name; }\n",
+        )
+        .expect("write LCOV source");
+
+        let coverage = json!({
+            istanbul_source.to_string_lossy(): {
+                "path": istanbul_source.to_string_lossy(),
+                "statementMap": {
+                    "0": {"start": {"line": 1, "column": 31}, "end": {"line": 1, "column": 43}}
+                },
+                "fnMap": {
+                    "0": {
+                        "name": "greet",
+                        "decl": {"start": {"line": 1, "column": 0}, "end": {"line": 1, "column": 45}},
+                        "loc": {"start": {"line": 1, "column": 0}, "end": {"line": 1, "column": 45}}
+                    }
+                },
+                "s": {"0": 1},
+                "f": {"0": 1}
+            }
+        });
+        fs::write(
+            root.join("packages/istanbul/coverage-final.json"),
+            serde_json::to_vec(&coverage).expect("encode Istanbul coverage"),
+        )
+        .expect("write Istanbul coverage");
+        fs::write(
+            root.join("packages/lcov/lcov.info"),
+            "TN:\nSF:src/fixture.ts\nFN:1,greet\nFNDA:1,greet\nFNF:1\nFNH:1\nDA:1,1\nLF:1\nLH:1\nend_of_record\n",
+        )
+        .expect("write LCOV coverage");
+        Self { root }
+    }
+
+    fn config(&self, groups: Value) {
+        fs::write(
+            self.root.join("crap4ts.json"),
+            serde_json::to_vec(&json!({"format": "json", "groups": groups}))
+                .expect("encode mixed config"),
+        )
+        .expect("write mixed config");
+    }
+}
+
+impl Drop for MixedFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 fn binary() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_crap4ts").expect("cargo binary path"))
 }
@@ -785,6 +855,407 @@ fn project_config_supplies_values_and_explicit_cli_wins() {
         serde_json::from_slice(&overridden.stdout).expect("overridden JSON report");
     assert_eq!(overridden_report["threshold"], 1);
     assert!(overridden.stderr.is_empty());
+}
+
+fn mixed_groups_config() -> Value {
+    json!({
+        "lcov": {
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"},
+            "threshold": 2
+        },
+        "istanbul": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {"path": "coverage-final.json", "format": "istanbul"},
+            "threshold": 1
+        }
+    })
+}
+
+#[test]
+fn mixed_package_groups_are_analyzed_with_independent_identity_and_policy() {
+    let fixture = MixedFixture::new();
+    fixture.config(mixed_groups_config());
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run mixed workspace");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("aggregate JSON report");
+    assert_eq!(report["version"], 2);
+    assert_eq!(
+        report["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|group| group["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["istanbul", "lcov"]
+    );
+    assert_eq!(report["groups"][0]["threshold"], 1);
+    assert_eq!(report["groups"][1]["threshold"], 2);
+    assert!(report.get("threshold").is_none());
+    let rows = report["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["group"].is_string()));
+    assert!(rows
+        .iter()
+        .all(|row| row["path"].as_str().unwrap().starts_with("packages/")));
+    assert_ne!(rows[0]["id"], rows[1]["id"]);
+    assert!(rows
+        .iter()
+        .any(|row| row["group"] == "istanbul" && row["coverage"]["fraction"] == 1.0));
+    assert!(rows
+        .iter()
+        .any(|row| row["group"] == "lcov" && row["coverage"]["fraction"] == 1.0));
+
+    let repeat = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("repeat mixed workspace");
+    assert_eq!(repeat.status.code(), Some(0));
+    assert_eq!(output.stdout, repeat.stdout);
+    assert_eq!(output.stderr, repeat.stderr);
+}
+
+#[test]
+fn checked_in_issue_nine_fixture_covers_istanbul_and_lcov_groups() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/issue-nine");
+    let output = Command::new(binary())
+        .current_dir(root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run checked-in mixed fixture");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("fixture JSON report");
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 2);
+    assert!(report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["coverage"]["status"] == "measured"));
+}
+
+#[test]
+fn package_group_declaration_order_does_not_change_canonical_json() {
+    let fixture = MixedFixture::new();
+    let first = json!([
+        {
+            "name": "lcov",
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"},
+            "threshold": 2
+        },
+        {
+            "name": "istanbul",
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {"path": "coverage-final.json", "format": "istanbul"},
+            "threshold": 1
+        }
+    ]);
+    fixture.config(first);
+    let first_output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run first declaration order");
+    assert_eq!(first_output.status.code(), Some(0));
+
+    let second = json!([
+        {
+            "name": "istanbul",
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {"path": "coverage-final.json", "format": "istanbul"},
+            "threshold": 1
+        },
+        {
+            "name": "lcov",
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"},
+            "threshold": 2
+        }
+    ]);
+    fixture.config(second);
+    let second_output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run second declaration order");
+    assert_eq!(second_output.status.code(), Some(0));
+    assert_eq!(first_output.stdout, second_output.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_group_artifact_identity_supports_deep_missing_parents() {
+    let fixture = MixedFixture::new();
+    fixture.config(json!({
+        "istanbul": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {
+                "path": "deep/one/two/generated.json",
+                "format": "istanbul",
+                "command": [
+                    "sh",
+                    "-c",
+                    "mkdir -p deep/one/two && cp coverage-final.json deep/one/two/generated.json"
+                ]
+            },
+            "threshold": 1
+        },
+        "lcov": {
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"},
+            "threshold": 2
+        }
+    }));
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run deep generated mixed workspace");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(fixture
+        .root
+        .join("packages/istanbul/deep/one/two/generated.json")
+        .is_file());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("aggregate JSON report");
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn package_group_artifact_aliases_are_rejected_before_generation() {
+    let fixture = MixedFixture::new();
+    fs::write(
+        fixture.root.join("packages/istanbul/src/second.ts"),
+        "function second() { return 2; }\n",
+    )
+    .unwrap();
+    fixture.config(json!({
+        "first": {
+            "root": "packages/istanbul",
+            "sources": ["src/fixture.ts"],
+            "coverage": {
+                "path": "deep/./shared.json",
+                "format": "istanbul",
+                "command": ["sh", "-c", "mkdir -p deep; cp coverage-final.json deep/shared.json"]
+            }
+        },
+        "second": {
+            "root": "packages/istanbul",
+            "sources": ["src/second.ts"],
+            "coverage": {
+                "path": "deep/shared.json",
+                "format": "istanbul",
+                "command": ["sh", "-c", "mkdir -p deep; cp coverage-final.json deep/shared.json"]
+            },
+            "report_only": true
+        }
+    }));
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run aliased artifact groups");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("shared with package group"));
+    assert!(!fixture.root.join("packages/istanbul/deep").exists());
+}
+
+#[test]
+fn package_group_cli_analysis_overrides_are_rejected_instead_of_broadcast() {
+    let fixture = MixedFixture::new();
+    fixture.config(mixed_groups_config());
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--threshold", "0", "--format", "json"])
+        .output()
+        .expect("run rejected group override");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with groups"));
+}
+
+#[test]
+fn package_group_root_must_remain_inside_repository_root() {
+    let fixture = MixedFixture::new();
+    fixture.config(json!({
+        "escape": {
+            "root": "..",
+            "sources": ["src"],
+            "coverage": {"path": "coverage.json"}
+        }
+    }));
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run escaped group");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("parent traversal"));
+}
+
+#[test]
+fn package_group_failure_has_no_partial_stdout_and_breach_does_not_mask_failure() {
+    let fixture = MixedFixture::new();
+    let mut groups = mixed_groups_config();
+    groups["istanbul"]["threshold"] = json!(0);
+    groups["lcov"]["coverage"] = json!("does-not-exist.info");
+    fixture.config(groups);
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run failed mixed workspace");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(r#""group":"lcov""#), "stderr: {stderr}");
+    assert!(!stderr.contains("quality gate breached"));
+}
+
+#[test]
+fn overlapping_group_sources_and_artifacts_are_rejected_during_preflight() {
+    let fixture = MixedFixture::new();
+    let groups = json!({
+        "one": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {"path": "coverage-final.json"}
+        },
+        "two": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {"path": "coverage-final.json"}
+        }
+    });
+    fixture.config(groups);
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run overlapping groups");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps package group"));
+}
+
+#[cfg(unix)]
+#[test]
+fn later_group_preflight_failure_runs_no_earlier_generation_command() {
+    let fixture = MixedFixture::new();
+    let marker = "packages/istanbul/generated.marker";
+    let groups = json!({
+        "first": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {
+                "path": "generated.json",
+                "command": ["sh", "-c", "touch generated.marker; cp coverage-final.json generated.json"]
+            }
+        },
+        "later": {
+            "root": "packages/lcov",
+            "sources": ["missing"],
+            "coverage": {"path": "lcov.info", "format": "lcov"}
+        }
+    });
+    fixture.config(groups);
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run preflight failure");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!fixture.root.join(marker).exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(r#""group":"later""#),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn malformed_existing_group_artifact_is_preflighted_before_generation() {
+    let fixture = MixedFixture::new();
+    fs::write(
+        fixture.root.join("packages/lcov/lcov.info"),
+        "this is not an LCOV tracefile\n",
+    )
+    .expect("replace later artifact");
+    let groups = json!({
+        "first": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {
+                "path": "generated.json",
+                "command": ["sh", "-c", "touch generated.marker; cp coverage-final.json generated.json"]
+            }
+        },
+        "later": {
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"}
+        }
+    });
+    fixture.config(groups);
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run malformed preflight");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!fixture
+        .root
+        .join("packages/istanbul/generated.marker")
+        .exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(r#""group":"later""#));
 }
 
 #[test]
