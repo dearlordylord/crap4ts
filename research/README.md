@@ -7,5 +7,4 @@ without erasing the earlier decision record.
 
 | Date | Topic | Conclusion |
 |---|---|---|
-| 2026-08-25 | [`crap4ts` alternatives](./2026-08-25-alternative-implementations.md) | Build a TypeScript-first implementation from Icaruswings-style boundaries, Gligorkot-style exclusive attribution, and an explicit quality-gate policy. |
-
+| 2026-08-25 | [`crap4ts` alternatives](./2026-08-25-alternative-implementations.md) | Build a Rust core and CLI from Icaruswings-style boundaries, Gligorkot-style exclusive attribution, and an explicit quality-gate policy; distribute it through standalone binaries and a thin npm wrapper. |

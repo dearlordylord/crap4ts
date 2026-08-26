@@ -1,6 +1,6 @@
 # crap4ts
 
-A TypeScript-first CRAP metric quality gate for TypeScript projects.
+A Rust-based CRAP metric quality gate for TypeScript projects.
 
 The intended pipeline is:
 
@@ -10,9 +10,9 @@ CLI -> source selection -> coverage adapter -> TypeScript analysis
 ```
 
 The implementation is being specified from comparative research rather than
-by selecting one existing port as a template. Version 1 will be implemented in
-TypeScript, with parser and coverage boundaries that allow a future Rust-backed
-adapter if measurement shows that one is useful.
+by selecting one existing port as a template. Version 1 consists of a Rust core
+and standalone CLI, plus a thin npm wrapper that installs and invokes the
+correct prebuilt binary for the user's platform.
 
 ## Alternative implementation research
 
@@ -26,9 +26,9 @@ decision.
 
 ## Status
 
-The implementation specification is tracked in the project issue tracker.
+The implementation specification is tracked in
+[issue #1](https://github.com/dearlordylord/crap4ts/issues/1).
 
 ## License
 
 [MIT](./LICENSE)
-
