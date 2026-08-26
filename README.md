@@ -260,8 +260,9 @@ crap4ts-1.0.0-win32-x64.tar.gz
 ```
 
 Each archive contains the native executable, `LICENSE`, and this README.
-`SHA256SUMS` covers exactly those five standalone archives. The npm directory
-contains its own `SHA256SUMS` for the six npm tarballs;
+`SHA256SUMS` covers exactly those five standalone archives plus the trusted
+`BINARY-SHA256SUMS` record (six entries total). The npm directory contains
+`npm/NPM-SHA256SUMS` for the six npm tarballs;
 verify it before extracting an archive:
 
 ```sh
@@ -327,8 +328,13 @@ npm run check:versions
 npm run check:schemas
 node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
 node scripts/npm-smoke.js --release-dir dist/release --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
-node scripts/release-gate.js --release-dir dist/release
+node scripts/release-gate.js --release-dir dist/release \
+  --binary-manifest /path/to/trusted/BINARY-SHA256SUMS
 ```
+
+The binary manifest is a separate immutable build artifact downloaded by the
+release workflow; the gate compares it with the in-release copy and every
+standalone/npm binary payload.
 
 The gate refuses a release with any missing target archive, checksum, npm
 package, required binary payload, or smoke marker. Publication is a separate
