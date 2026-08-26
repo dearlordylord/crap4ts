@@ -63,13 +63,15 @@ Source discovery accepts only project-local TypeScript identities, supports
 `.ts`/`.tsx` (and TypeScript module variants), skips declaration files,
 conventional test files, dependency/build/coverage directories, and rejects
 symlinked directories. Explicit source paths must exist and be readable;
-missing or unreadable paths fail with a source-selection error, while an empty
-selection fails with a configuration error. Absolute paths are allowed only
-when they resolve inside `--project-root`; parent traversal and symlink escape
-attempts are rejected. Paths are normalized to `/`, so POSIX and Windows
-separators produce the same project-relative identity. Coverage entries must
-use that identity (or an absolute path inside `--project-root`); basename and
-unrelated-path guesses are rejected.
+missing, unreadable, unsupported, or excluded files fail with a
+source-selection error, while an empty directory selection fails with a
+configuration error. Absolute paths are allowed only when they resolve inside
+`--project-root`; parent traversal and symlink escape attempts are rejected.
+Each selected directory is also a traversal boundary. Paths are normalized to
+`/` only after filesystem resolution, so POSIX and Windows separators produce
+the same project-relative identity. Coverage entries must use that identity
+(or an absolute path inside `--project-root`); basename and unrelated-path
+guesses are rejected.
 
 ## License
 

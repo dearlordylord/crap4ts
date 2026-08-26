@@ -148,6 +148,7 @@ fn source_identity_is_canonical_for_redundant_path_segments() {
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }
 
+#[cfg(windows)]
 #[test]
 fn source_identity_accepts_windows_separators() {
     let fixture = Fixture::new();
@@ -379,6 +380,28 @@ fn missing_and_empty_source_selections_are_explicit_errors() {
 }
 
 #[test]
+fn explicitly_selected_unsupported_and_excluded_files_are_errors() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/not-typescript.js"),
+        "function nope() {}\n",
+    )
+    .unwrap();
+    let unsupported = run_with_source(&fixture, &[], &["src/not-typescript.js"]);
+    assert_eq!(unsupported.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("unsupported extension"));
+
+    fs::write(
+        fixture.root.join("src/explicit.test.ts"),
+        "function ignored() { return 1; }\n",
+    )
+    .unwrap();
+    let excluded = run_with_source(&fixture, &[], &["src/explicit.test.ts"]);
+    assert_eq!(excluded.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&excluded.stderr).contains("is excluded"));
+}
+
+#[test]
 fn parent_and_absolute_source_escape_attempts_are_rejected() {
     let fixture = Fixture::new();
     let outside_name = format!("crap4ts-outside-{}.ts", std::process::id());
@@ -426,8 +449,52 @@ fn symlink_source_escape_is_rejected_during_directory_discovery() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("escapes project root"),
+        stderr.contains("escapes selected source root"),
         "unexpected stderr: {stderr}"
     );
     let _ = fs::remove_file(outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_directory_is_a_symlink_confinement_boundary() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root.join("other")).unwrap();
+    fs::write(
+        fixture.root.join("other/escaped.ts"),
+        "function escaped() { return 1; }\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        fixture.root.join("other/escaped.ts"),
+        fixture.root.join("src/escaped.ts"),
+    )
+    .unwrap();
+
+    let output = run_with_source(&fixture, &[], &["src"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("selected source root"));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_targets_in_excluded_directories_are_not_selected() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root.join("src/tests")).unwrap();
+    fs::write(
+        fixture.root.join("src/tests/hidden.ts"),
+        "function hidden() { return 1; }\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        fixture.root.join("src/tests/hidden.ts"),
+        fixture.root.join("src/alias.ts"),
+    )
+    .unwrap();
+
+    let output = run_with_source(&fixture, &["--format", "json"], &["src"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }

@@ -33,7 +33,15 @@ pub fn collect_sources(root: &Path, requested: &[PathBuf]) -> Result<Vec<SourceF
 
     for requested_path in inputs {
         let path = resolve_requested_path(&root, &requested_path)?;
-        collect_path(&root, &path, &mut files)?;
+        let boundary = if path.is_dir() {
+            path.clone()
+        } else {
+            root.clone()
+        };
+        if path.is_file() {
+            validate_explicit_file(&root, &path)?;
+        }
+        collect_path(&root, &boundary, &path, &mut files)?;
     }
 
     files
@@ -70,22 +78,14 @@ fn resolve_requested_path(root: &Path, requested: &Path) -> Result<PathBuf, Core
         ));
     }
 
-    // Coverage tools and command-line users commonly use Windows separators
-    // even when the surrounding tooling runs on POSIX. Normalize before
-    // joining so that source selection has the same identity on both systems.
-    let requested = normalize_separators(requested)?;
+    // Keep the operating system's native path representation intact. In
+    // particular, Windows drive and verbatim prefixes must reach canonicalize
+    // unchanged; separator normalization belongs only to project identities.
     let path = if requested.is_absolute() {
-        requested
+        requested.to_path_buf()
     } else {
         root.join(requested)
     };
-    let lexical = normalize_path(&path);
-    if !lexical.starts_with(root) {
-        return Err(CoreError::SourceSelection(format!(
-            "source path '{}' escapes project root",
-            path.display()
-        )));
-    }
     let canonical = fs::canonicalize(&path).map_err(|error| {
         CoreError::SourceSelection(format!(
             "unable to resolve source '{}': {error}",
@@ -107,47 +107,23 @@ fn resolve_requested_path(root: &Path, requested: &Path) -> Result<PathBuf, Core
     Ok(canonical)
 }
 
-fn normalize_separators(path: &Path) -> Result<PathBuf, CoreError> {
-    let value = path.to_str().ok_or_else(|| {
-        CoreError::SourceSelection(format!(
-            "source path '{}' is not valid UTF-8",
-            path.display()
-        ))
-    })?;
-    Ok(PathBuf::from(value.replace('\\', "/")))
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                // `PathBuf::pop` leaves a filesystem root in place, which is
-                // exactly the behavior needed for confinement checks.
-                let _ = normalized.pop();
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    normalized
-}
-
 fn collect_path(
-    root: &Path,
+    project_root: &Path,
+    boundary: &Path,
     path: &Path,
     files: &mut BTreeMap<String, String>,
 ) -> Result<(), CoreError> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() {
         let target = fs::canonicalize(path).map_err(io_error)?;
-        if !target.starts_with(root) {
+        if !target.starts_with(boundary) {
             return Err(CoreError::SourceSelection(format!(
-                "symlink '{}' escapes project root",
+                "symlink '{}' escapes selected source root",
                 path.display()
             )));
+        }
+        if excluded_project_directory(project_root, &target) {
+            return Ok(());
         }
         if target.is_dir() {
             return Err(CoreError::SourceSelection(format!(
@@ -155,10 +131,10 @@ fn collect_path(
                 path.display()
             )));
         }
-        return collect_path(root, &target, files);
+        return collect_path(project_root, boundary, &target, files);
     }
 
-    if metadata.is_dir() && path != root && path.file_name().is_some_and(excluded_directory) {
+    if excluded_project_directory(project_root, path) {
         return Ok(());
     }
 
@@ -177,7 +153,7 @@ fn collect_path(
             {
                 continue;
             }
-            collect_path(root, &child.path(), files)?;
+            collect_path(project_root, boundary, &child.path(), files)?;
         }
         return Ok(());
     }
@@ -185,7 +161,7 @@ fn collect_path(
     if !metadata.is_file() || !is_typescript(path) || is_declaration(path) || is_test_file(path) {
         return Ok(());
     }
-    let relative = path.strip_prefix(root).map_err(|_| {
+    let relative = path.strip_prefix(project_root).map_err(|_| {
         CoreError::SourceSelection(format!("source '{}' escaped project root", path.display()))
     })?;
     let identity = relative.to_str().ok_or_else(|| {
@@ -206,13 +182,41 @@ fn collect_path(
     Ok(())
 }
 
+fn validate_explicit_file(project_root: &Path, path: &Path) -> Result<(), CoreError> {
+    if !is_typescript(path) {
+        return Err(CoreError::SourceSelection(format!(
+            "explicit source file '{}' has an unsupported extension",
+            path.display()
+        )));
+    }
+    if excluded_project_directory(project_root, path) || is_declaration(path) || is_test_file(path)
+    {
+        return Err(CoreError::SourceSelection(format!(
+            "explicit source file '{}' is excluded",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn excluded_project_directory(project_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return false;
+    };
+    relative
+        .components()
+        .any(|component| matches!(component, Component::Normal(name) if excluded_directory(name)))
+}
+
 fn reject_symlink_directories(path: &Path) -> Result<(), CoreError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        let metadata = fs::symlink_metadata(&current).map_err(io_error)?;
+    // Ancestors retain native prefixes (including Windows drive and verbatim
+    // prefixes), unlike rebuilding a path one `Component` at a time.
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for current in ancestors {
+        let metadata = fs::symlink_metadata(current).map_err(io_error)?;
         if metadata.file_type().is_symlink() {
-            let target = fs::canonicalize(&current).map_err(io_error)?;
+            let target = fs::canonicalize(current).map_err(io_error)?;
             if target.is_dir() {
                 return Err(CoreError::SourceSelection(format!(
                     "symlink directory '{}' is not allowed",
@@ -279,4 +283,23 @@ fn excluded_directory(name: &OsStr) -> bool {
             | "__tests__"
             | "__mocks__"
     )
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn drive_and_verbatim_paths_keep_native_prefixes() {
+        let drive = PathBuf::from(r"C:\project");
+        assert!(drive.is_absolute());
+        let drive_file = drive.join(r"src\file.ts");
+        assert_eq!(drive_file.to_str(), Some(r"C:\project\src\file.ts"));
+
+        let verbatim = PathBuf::from(r"\\?\C:\project");
+        assert!(verbatim.is_absolute());
+        let verbatim_file = verbatim.join(r"src\file.ts");
+        assert_eq!(verbatim_file.to_str(), Some(r"\\?\C:\project\src\file.ts"));
+        assert!(verbatim_file.starts_with(&verbatim));
+    }
 }
