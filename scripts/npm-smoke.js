@@ -113,7 +113,15 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
 
   const executableName = process.platform === 'win32' ? 'crap4ts.cmd' : 'crap4ts';
   const executable = path.join(consumer, 'node_modules', '.bin', executableName);
-  const invocation = (args) => npmBinInvocation(executable, args);
+  const launcher = path.join(
+    consumer,
+    'node_modules',
+    '@crap4ts',
+    'crap4ts',
+    'bin',
+    'crap4ts.js',
+  );
+  const invocation = (args) => npmBinInvocation(executable, launcher, args);
   const helpCommand = invocation(['--help']);
   const help = run(helpCommand.command, helpCommand.args, consumer, helpCommand.spawnOptions);
   assert.match(help.stdout, /Usage: crap4ts/);

@@ -12,7 +12,7 @@ use std::{
 };
 
 use clap::ValueEnum;
-use crap4ts_core::{CoverageFormat, ProjectRelativePath, ThresholdPolicy};
+use crap4ts_core::{CoverageFormat, ProjectRelativePath, SourceSelectionOptions, ThresholdPolicy};
 use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
@@ -160,6 +160,15 @@ struct ReportConfig {
     format: Option<OutputFormat>,
     #[serde(default, deserialize_with = "reject_null")]
     json: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceFiltersConfig {
+    #[serde(default)]
+    include_tests: bool,
+    #[serde(default)]
+    include_generated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,6 +331,13 @@ struct SettingsConfig {
         deserialize_with = "reject_null"
     )]
     source_roots: Option<PathList>,
+    #[serde(
+        default,
+        alias = "sourceFilters",
+        alias = "source-filters",
+        deserialize_with = "reject_null"
+    )]
+    source_filters: Option<SourceFiltersConfig>,
     #[serde(default, deserialize_with = "reject_null")]
     coverage: Option<CoverageConfig>,
     #[serde(
@@ -465,6 +481,7 @@ struct FileConfig {
 #[derive(Debug, Default)]
 pub(crate) struct ConfigValues {
     pub(crate) sources: Option<Vec<PathBuf>>,
+    pub(crate) source_selection: SourceSelectionOptions,
     pub(crate) coverage: Option<PathBuf>,
     pub(crate) coverage_format: Option<CoverageFormat>,
     pub(crate) coverage_command: Option<Vec<String>>,
@@ -616,6 +633,13 @@ impl SettingsConfig {
 
         Ok(ConfigValues {
             sources,
+            source_selection: self.source_filters.map_or_else(
+                SourceSelectionOptions::default,
+                |filters| SourceSelectionOptions {
+                    include_tests: filters.include_tests,
+                    include_generated: filters.include_generated,
+                },
+            ),
             coverage,
             coverage_format,
             coverage_command,
@@ -641,6 +665,7 @@ impl FileConfig {
         // explicit rejection prevents an apparently harmless top-level
         // default from leaking into one package and not another.
         if settings.sources.is_some()
+            || settings.source_selection != SourceSelectionOptions::default()
             || settings.coverage.is_some()
             || settings.coverage_format.is_some()
             || settings.coverage_command.is_some()
@@ -699,6 +724,7 @@ impl FileConfig {
 
         Ok(ConfigValues {
             sources: None,
+            source_selection: SourceSelectionOptions::default(),
             coverage: None,
             coverage_format: None,
             coverage_command: None,
@@ -847,6 +873,26 @@ mod tests {
         let error = serde_json::from_str::<FileConfig>(r#"{"threshold":null}"#)
             .expect_err("null threshold must fail");
         assert!(error.to_string().contains("null is not permitted"));
+    }
+
+    #[test]
+    fn safe_source_filter_overrides_are_explicit_and_closed() {
+        let config: FileConfig = serde_json::from_str(
+            r#"{"source_filters":{"include_tests":true,"include_generated":true}}"#,
+        )
+        .unwrap();
+        let values = config.into_values().unwrap();
+        assert_eq!(
+            values.source_selection,
+            SourceSelectionOptions {
+                include_tests: true,
+                include_generated: true,
+            }
+        );
+        assert!(serde_json::from_str::<FileConfig>(
+            r#"{"source_filters":{"include_dependencies":true}}"#
+        )
+        .is_err());
     }
 
     #[test]

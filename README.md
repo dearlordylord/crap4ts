@@ -9,8 +9,8 @@ CLI -> source selection -> coverage adapter -> TypeScript analysis
     -> exclusive coverage attribution -> CRAP scoring -> report and gate
 ```
 
-The implementation is being specified from comparative research rather than
-by selecting one existing port as a template. Version 1 consists of a Rust core
+The implementation follows comparative research rather than selecting one
+existing port as a template. Version 1 consists of a Rust core
 and standalone CLI, plus a thin npm wrapper that installs and invokes the
 correct prebuilt binary for the user's platform.
 
@@ -26,7 +26,7 @@ decision.
 
 ## Development and CLI
 
-The standalone Rust CLI is the first implementation slice. A Rust 1.94 (or
+The standalone Rust CLI is the primary interface. A Rust 1.94 (or
 newer) toolchain is required because the Oxc parser is compiled into the core.
 From a fresh checkout, run:
 
@@ -35,7 +35,13 @@ cargo build --workspace
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+npm ci --force
+npm test
 ```
+
+`--force` is limited to the workspace install because npm otherwise rejects
+the checked-in non-host native workspaces before applying their optional
+dependency filters. Published consumers do not need this flag.
 
 The binary consumes an existing Istanbul `coverage-final.json` or LCOV
 tracefile artifact and accepts one or more TypeScript source files or
@@ -73,6 +79,12 @@ unknown fields are rejected. A minimal configuration is:
 unknown rows without assigning them a score. Threshold keys are exact
 project-relative paths; separators are normalized and basename or glob
 matching is never used.
+
+Discovery excludes conventional test files/directories and generated output by
+default. A project that intentionally analyzes those sources can opt in with
+`"source_filters": {"include_tests": true, "include_generated": true}` at the
+top level or within an individual package group. `.git` and `node_modules`
+remain excluded and cannot be enabled.
 
 To generate fresh coverage in the same invocation, add an argv command to the
 coverage object (or use the equivalent top-level `coverage_command` field):

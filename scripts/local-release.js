@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const targets = require('../release-targets.json');
+const { npmInvocation } = require('./npm-command.js');
 
 const root = path.resolve(__dirname, '..');
 const META_PACKAGE_NAME = '@crap4ts/crap4ts';
@@ -31,11 +32,13 @@ function npmPublicationPlan(version, releaseDirectory = 'dist/release') {
 }
 
 function command(name, args, options = {}) {
-  const result = spawnSync(name, args, {
+  const invocation = releaseCommandInvocation(name, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: root,
     encoding: options.inherit ? undefined : 'utf8',
     stdio: options.inherit ? 'inherit' : 'pipe',
     maxBuffer: 32 * 1024 * 1024,
+    ...invocation.spawnOptions,
   });
   if (result.error || result.status !== 0) {
     const detail = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
@@ -48,7 +51,32 @@ function command(name, args, options = {}) {
 }
 
 function attempt(name, args) {
-  return spawnSync(name, args, { cwd: root, encoding: 'utf8' });
+  const invocation = releaseCommandInvocation(name, args);
+  return spawnSync(invocation.command, invocation.args, {
+    cwd: root,
+    encoding: 'utf8',
+    ...invocation.spawnOptions,
+  });
+}
+
+function releaseCommandInvocation(
+  name,
+  args,
+  platform = process.platform,
+  execPath = process.execPath,
+) {
+  if (platform === 'win32' && name === 'npm') {
+    const npmCli = path.win32.join(
+      path.win32.dirname(execPath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+    const npm = npmInvocation(platform, execPath, npmCli);
+    return { command: npm.command, args: [...npm.argsPrefix, ...args], spawnOptions: {} };
+  }
+  return { command: name, args, spawnOptions: {} };
 }
 
 function sha256(file) {
@@ -95,18 +123,20 @@ function ensureTag(tag, head) {
   command('git', ['push', 'origin', `refs/tags/${tag}`], { inherit: true });
 }
 
-function findReleaseRun(head) {
+function findReleaseRun(head, tag) {
   for (let index = 0; index < 40; index += 1) {
-    const runs = JSON.parse(command('gh', ['run', 'list', '--workflow', 'Release', '--limit', '20', '--json', 'databaseId,event,headSha']));
-    const run = selectReleaseRun(runs, head);
+    const runs = JSON.parse(command('gh', ['run', 'list', '--workflow', 'Release', '--limit', '20', '--json', 'databaseId,event,headBranch,headSha']));
+    const run = selectReleaseRun(runs, head, tag);
     if (run) return String(run.databaseId);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
   }
   throw new Error(`Release workflow did not start for ${head}`);
 }
 
-function selectReleaseRun(runs, head) {
-  return runs.find((run) => run.headSha === head && run.event === 'push');
+function selectReleaseRun(runs, head, tag) {
+  return runs.find(
+    (run) => run.headSha === head && run.headBranch === tag && run.event === 'push',
+  );
 }
 
 function downloadArtifacts(runId, temporaryDirectory) {
@@ -132,6 +162,9 @@ function releaseAssetFiles(releaseDirectory, version) {
 function reconcileRelease(tag, version, releaseDirectory, temporaryDirectory) {
   const existing = attempt('gh', ['release', 'view', tag, '--json', 'isDraft,tagName,assets']);
   if (existing.status !== 0) {
+    if (!isMissingReleaseError(existing)) {
+      throw new Error(`could not inspect GitHub release ${tag}: ${existing.stderr.trim()}`);
+    }
     command('gh', ['release', 'create', tag, '--draft', '--verify-tag', '--title', `crap4ts ${tag}`, '--notes', 'Verified cross-platform release.'], { inherit: true });
   }
   const release = JSON.parse(command('gh', ['release', 'view', tag, '--json', 'isDraft,tagName,assets']));
@@ -159,6 +192,10 @@ function reconcileRelease(tag, version, releaseDirectory, temporaryDirectory) {
   return release.isDraft;
 }
 
+function isMissingReleaseError(result) {
+  return result.status !== 0 && /release not found|HTTP 404|404 Not Found/i.test(result.stderr || '');
+}
+
 function requireDraftForUpload(isDraft, assetName) {
   assert.ok(isDraft, `GitHub release is already published and is missing ${assetName}`);
 }
@@ -175,7 +212,7 @@ function publishNpmPackages(version, releaseDirectory, temporaryDirectory) {
     const url = JSON.parse(viewed.stdout);
     assert.ok(typeof url === 'string' && url.startsWith('https://'), `npm returned an invalid tarball URL for ${item.name}@${version}`);
     const remoteFile = path.join(temporaryDirectory, `remote-${item.tarball}`);
-    command('curl', ['--fail', '--location', '--silent', '--show-error', url, '--output', remoteFile]);
+    command(process.execPath, [path.join(root, 'scripts', 'download.js'), url, remoteFile]);
     assert.equal(sha256(remoteFile), sha256(item.file), `npm already has different bytes for ${item.name}@${version}`);
     process.stdout.write(`skip identical npm package ${item.name}@${version}\n`);
   }
@@ -201,7 +238,7 @@ function main(args = process.argv.slice(2)) {
     return;
   }
   ensureTag(tag, head);
-  const runId = findReleaseRun(head);
+  const runId = findReleaseRun(head, tag);
   command('gh', ['run', 'watch', runId, '--exit-status'], { inherit: true });
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `crap4ts-${tag}-`));
   try {
@@ -225,9 +262,11 @@ if (require.main === module) {
 module.exports = {
   main,
   npmPublicationPlan,
+  isMissingReleaseError,
   packageTarballName,
   parseArgs,
   releaseAssetFiles,
+  releaseCommandInvocation,
   requireDraftForUpload,
   selectReleaseRun,
   selectSuccessfulCi,

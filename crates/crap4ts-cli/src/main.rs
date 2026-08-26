@@ -12,10 +12,10 @@ use std::{
 use clap::{error::ErrorKind, ArgAction, Parser};
 use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
 use crap4ts_core::{
-    aggregate_reports, analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter,
-    render_json, render_text, validate_sources, CoverageAdapter, CoverageFormat, Diagnostic,
-    DiagnosticCategory, GroupName, GroupRoot, PackageReport, ProjectRelativePath, SourceFile,
-    ThresholdPolicy,
+    aggregate_reports, analyze_with_adapter_and_policy, collect_sources_with_options,
+    make_coverage_adapter, render_json, render_text, validate_sources, CoverageAdapter,
+    CoverageFormat, Diagnostic, DiagnosticCategory, GroupName, GroupRoot, PackageReport,
+    ProjectRelativePath, SourceFile, ThresholdPolicy,
 };
 
 #[derive(Debug, Parser)]
@@ -246,7 +246,8 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
     if !(cli.source_paths.is_empty() && cli.source_options.is_empty()) {
         requested.extend(cli.source_options.iter().cloned());
     }
-    let sources = collect_sources(root, &requested).map_err(|error| error.to_string())?;
+    let sources = collect_sources_with_options(root, &requested, values.source_selection)
+        .map_err(|error| error.to_string())?;
     if sources.is_empty() {
         return Err(
             "configuration: source selection produced no TypeScript files"
@@ -364,8 +365,9 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             .into_iter()
             .map(|path| group_relative_path(path, root_identity.as_str()))
             .collect::<Vec<_>>();
-        let sources = collect_sources(&group_root, &requested)
-            .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
+        let sources =
+            collect_sources_with_options(&group_root, &requested, group.settings.source_selection)
+                .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
         if sources.is_empty() {
             return Err(group_failure(
                 &group.name,

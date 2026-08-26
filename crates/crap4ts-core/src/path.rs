@@ -13,6 +13,14 @@ use std::{
 
 use crate::domain::{CoreError, ProjectRelativePath, SourceFile};
 
+/// Safe overrides for conventional source discovery filters. Repository
+/// metadata and dependencies remain excluded regardless of these settings.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SourceSelectionOptions {
+    pub include_tests: bool,
+    pub include_generated: bool,
+}
+
 /// Select TypeScript source files below a project root.
 ///
 /// Inputs are de-duplicated and sorted by their canonical project-relative
@@ -23,6 +31,14 @@ use crate::domain::{CoreError, ProjectRelativePath, SourceFile};
 /// input must exist and be readable, while a directory that contains no
 /// reportable files returns an empty selection for the caller to handle.
 pub fn collect_sources(root: &Path, requested: &[PathBuf]) -> Result<Vec<SourceFile>, CoreError> {
+    collect_sources_with_options(root, requested, SourceSelectionOptions::default())
+}
+
+pub fn collect_sources_with_options(
+    root: &Path,
+    requested: &[PathBuf],
+    options: SourceSelectionOptions,
+) -> Result<Vec<SourceFile>, CoreError> {
     let root = canonicalize_root(root)?;
     let mut files = BTreeMap::new();
     let inputs = if requested.is_empty() {
@@ -39,9 +55,9 @@ pub fn collect_sources(root: &Path, requested: &[PathBuf]) -> Result<Vec<SourceF
             root.clone()
         };
         if path.is_file() {
-            validate_explicit_file(&root, &path)?;
+            validate_explicit_file(&root, &path, options)?;
         }
-        collect_path(&root, &boundary, &path, &mut files)?;
+        collect_path(&root, &boundary, &path, &mut files, options)?;
     }
 
     files
@@ -134,6 +150,7 @@ fn collect_path(
     boundary: &Path,
     path: &Path,
     files: &mut BTreeMap<String, String>,
+    options: SourceSelectionOptions,
 ) -> Result<(), CoreError> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() {
@@ -144,7 +161,7 @@ fn collect_path(
                 path.display()
             )));
         }
-        if excluded_project_directory(project_root, &target) {
+        if excluded_project_directory(project_root, &target, options) {
             return Ok(());
         }
         if target.is_dir() {
@@ -153,10 +170,10 @@ fn collect_path(
                 path.display()
             )));
         }
-        return collect_path(project_root, boundary, &target, files);
+        return collect_path(project_root, boundary, &target, files, options);
     }
 
-    if excluded_project_directory(project_root, path) {
+    if excluded_project_directory(project_root, path, options) {
         return Ok(());
     }
 
@@ -171,16 +188,20 @@ fn collect_path(
             // symlink must still be resolved and rejected if it escapes the
             // project root. `file_type` does not follow symlinks.
             if child.file_type().map_err(io_error)?.is_dir()
-                && excluded_directory(&child.file_name())
+                && excluded_directory(&child.file_name(), options)
             {
                 continue;
             }
-            collect_path(project_root, boundary, &child.path(), files)?;
+            collect_path(project_root, boundary, &child.path(), files, options)?;
         }
         return Ok(());
     }
 
-    if !metadata.is_file() || !is_typescript(path) || is_declaration(path) || is_test_file(path) {
+    if !metadata.is_file()
+        || !is_typescript(path)
+        || is_declaration(path)
+        || (!options.include_tests && is_test_file(path))
+    {
         return Ok(());
     }
     let relative = path.strip_prefix(project_root).map_err(|_| {
@@ -204,14 +225,20 @@ fn collect_path(
     Ok(())
 }
 
-fn validate_explicit_file(project_root: &Path, path: &Path) -> Result<(), CoreError> {
+fn validate_explicit_file(
+    project_root: &Path,
+    path: &Path,
+    options: SourceSelectionOptions,
+) -> Result<(), CoreError> {
     if !is_typescript(path) {
         return Err(CoreError::SourceSelection(format!(
             "explicit source file '{}' has an unsupported extension",
             path.display()
         )));
     }
-    if excluded_project_directory(project_root, path) || is_declaration(path) || is_test_file(path)
+    if excluded_project_directory(project_root, path, options)
+        || is_declaration(path)
+        || (!options.include_tests && is_test_file(path))
     {
         return Err(CoreError::SourceSelection(format!(
             "explicit source file '{}' is excluded",
@@ -221,13 +248,17 @@ fn validate_explicit_file(project_root: &Path, path: &Path) -> Result<(), CoreEr
     Ok(())
 }
 
-fn excluded_project_directory(project_root: &Path, path: &Path) -> bool {
+fn excluded_project_directory(
+    project_root: &Path,
+    path: &Path,
+    options: SourceSelectionOptions,
+) -> bool {
     let Ok(relative) = path.strip_prefix(project_root) else {
         return false;
     };
     relative
         .components()
-        .any(|component| matches!(component, Component::Normal(name) if excluded_directory(name)))
+        .any(|component| matches!(component, Component::Normal(name) if excluded_directory(name, options)))
 }
 
 fn reject_symlink_directories(path: &Path) -> Result<(), CoreError> {
@@ -288,23 +319,58 @@ fn is_test_file(path: &Path) -> bool {
         || stem.ends_with("_spec")
 }
 
-fn excluded_directory(name: &OsStr) -> bool {
+fn excluded_directory(name: &OsStr, options: SourceSelectionOptions) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | "coverage"
-            | ".git"
-            | "test"
-            | "tests"
-            | "__tests__"
-            | "__mocks__"
-    )
+    let name = name.to_ascii_lowercase();
+    matches!(name.as_str(), "node_modules" | ".git")
+        || (!options.include_generated
+            && matches!(name.as_str(), "target" | "dist" | "build" | "coverage"))
+        || (!options.include_tests
+            && matches!(name.as_str(), "test" | "tests" | "__tests__" | "__mocks__"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_filter_overrides_include_tests_and_generated_but_not_dependencies() {
+        let root =
+            std::env::temp_dir().join(format!("crap4ts-source-filters-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for directory in ["src", "tests", "dist", "node_modules/dependency"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for file in [
+            "src/main.ts",
+            "tests/main.ts",
+            "dist/generated.ts",
+            "node_modules/dependency/index.ts",
+        ] {
+            fs::write(root.join(file), "export const value = () => 1;\n").unwrap();
+        }
+
+        let selected = collect_sources_with_options(
+            &root,
+            &[],
+            SourceSelectionOptions {
+                include_tests: true,
+                include_generated: true,
+            },
+        )
+        .unwrap();
+        let identities = selected
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            ["dist/generated.ts", "src/main.ts", "tests/main.ts"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(all(test, windows))]

@@ -6,33 +6,24 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const SUPPORTED_PLATFORMS = Object.freeze({
-  'linux-x64': Object.freeze({
-    packageName: '@crap4ts/linux-x64',
-    binaryName: 'crap4ts',
-  }),
-  'linux-arm64': Object.freeze({
-    packageName: '@crap4ts/linux-arm64',
-    binaryName: 'crap4ts',
-  }),
-  'darwin-x64': Object.freeze({
-    packageName: '@crap4ts/darwin-x64',
-    binaryName: 'crap4ts',
-  }),
-  'darwin-arm64': Object.freeze({
-    packageName: '@crap4ts/darwin-arm64',
-    binaryName: 'crap4ts',
-  }),
-  'win32-x64': Object.freeze({
-    packageName: '@crap4ts/win32-x64',
-    binaryName: 'crap4ts.exe',
-  }),
-});
+const WRAPPER_METADATA = require('../package.json');
 
 const SIGNALS = Object.freeze(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']);
 
 function platformKey() {
   return `${process.platform}-${process.arch}`;
+}
+
+function supportedPlatformKeys(metadata = WRAPPER_METADATA) {
+  return Object.keys(metadata.optionalDependencies || {}).map((name) =>
+    name.replace(/^@crap4ts\//, ''),
+  );
+}
+
+function platformDescriptor(key, metadata = WRAPPER_METADATA) {
+  const packageName = `@crap4ts/${key}`;
+  if (!Object.hasOwn(metadata.optionalDependencies || {}, packageName)) return undefined;
+  return { packageName, binaryName: key.startsWith('win32-') ? 'crap4ts.exe' : 'crap4ts' };
 }
 
 function fail(message) {
@@ -56,12 +47,12 @@ function signalExitCode(signal) {
 
 function main() {
   const key = platformKey();
-  const selected = SUPPORTED_PLATFORMS[key];
+  const selected = platformDescriptor(key);
   if (!selected) {
     fail(
-      `unsupported platform ${JSON.stringify(key)}. Supported platforms: ${Object.keys(
-        SUPPORTED_PLATFORMS,
-      ).join(', ')}. Install a supported package or build crap4ts with Cargo.`,
+      `unsupported platform ${JSON.stringify(key)}. Supported platforms: ${supportedPlatformKeys().join(
+        ', ',
+      )}. Install a supported package or build crap4ts with Cargo.`,
     );
     return;
   }
@@ -166,4 +157,6 @@ function main() {
   });
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { main, platformDescriptor, supportedPlatformKeys };

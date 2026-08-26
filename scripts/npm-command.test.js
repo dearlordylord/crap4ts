@@ -25,11 +25,17 @@ test('Windows npm subprocesses fail closed without the lifecycle CLI path', () =
   assert.throws(() => npmInvocation('win32', 'node.exe', ''), /npm_execpath/);
 });
 
-test('Windows npm bin shims run through the command interpreter', () => {
-  assert.deepEqual(npmBinInvocation('C:\\tmp\\crap4ts.cmd', ['--help'], 'win32'), {
-    command: 'C:\\tmp\\crap4ts.cmd',
-    args: ['--help'],
-    spawnOptions: { shell: true },
+test('Windows npm bin launch avoids shell interpretation of hostile values', () => {
+  assert.deepEqual(npmBinInvocation(
+    'C:\\tmp & hostile\\crap4ts.cmd',
+    'C:\\tmp & hostile\\node_modules\\@crap4ts\\crap4ts\\bin\\crap4ts.js',
+    ['--flag=;&'],
+    'win32',
+    'C:\\node\\node.exe',
+  ), {
+    command: 'C:\\node\\node.exe',
+    args: ['C:\\tmp & hostile\\node_modules\\@crap4ts\\crap4ts\\bin\\crap4ts.js', '--flag=;&'],
+    spawnOptions: {},
   });
 });
 

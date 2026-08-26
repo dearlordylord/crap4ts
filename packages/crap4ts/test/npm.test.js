@@ -8,9 +8,10 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { pack, verifyNativePack } = require('../../../scripts/pack-platform.js');
 const { stage, targets } = require('../../../scripts/stage-platform.js');
+const { npmInvocation } = require('../../../scripts/npm-command.js');
+const { platformDescriptor, supportedPlatformKeys } = require('../bin/crap4ts.js');
 
 const repositoryRoot = path.resolve(__dirname, '../../..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function runNpmExecutable(args, cwd = repositoryRoot) {
   // Each test is hermetic: packaging tests may remove their temporary staged
@@ -18,9 +19,11 @@ function runNpmExecutable(args, cwd = repositoryRoot) {
   const hostTarget = `${process.platform}-${process.arch}`;
   const hostBinary = path.join(repositoryRoot, 'target', 'debug', targets[hostTarget].binaryName);
   if (fs.existsSync(hostBinary)) stage(hostTarget, hostBinary);
+  const npm = npmInvocation();
   return spawnSync(
-    npm,
+    npm.command,
     [
+      ...npm.argsPrefix,
       'exec',
       '--silent',
       '--offline',
@@ -79,6 +82,16 @@ test('npm executable forwards help output and exits successfully', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Usage: crap4ts/);
   assert.match(result.stdout, /--coverage/);
+});
+
+test('launcher platform selection is derived from published optional dependencies', () => {
+  assert.deepEqual(supportedPlatformKeys().sort(), Object.keys(targets).sort());
+  for (const [key, target] of Object.entries(targets)) {
+    assert.deepEqual(platformDescriptor(key), {
+      packageName: target.packageName,
+      binaryName: target.binaryName,
+    });
+  }
 });
 
 test('npm executable runs the minimal fixture and forwards gate status', () => {

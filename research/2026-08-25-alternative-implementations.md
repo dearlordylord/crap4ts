@@ -72,7 +72,7 @@ Each dimension was rated 0–4, then weighted:
 | C. Reference and real-world fitness | 15 | Formula, deterministic selection/order, stale coverage, workspaces, CI output and exit behavior |
 | D. Test architecture and evidence | 15 | Formula/parser/adapter/application/failure tests plus an executed black-box fixture |
 | E. Changeability | 15 | Impact of a second coverage format, a complexity construct, two-package workspace, new report format, and threshold policy |
-| F. Production operability | 10 | Install/build/test path, packaging, runtime independence, documentation, focused vocabulary, and operational reliability |
+| F. Operability and kata value | 10 | Install/build/test path, packaging, types, documentation, focused vocabulary, and learnability |
 
 The shared fixture included TypeScript and TSX, nested functions, identical
 function names in different files, full/zero/partial/missing Istanbul coverage,
@@ -141,7 +141,7 @@ is false. A new implementation should keep the ownership algorithm but preserve
 that result as unknown. The repository required Node 22 while the review host
 had Node 20, so its install/test entry evidence remained partial.
 
-### Best compact baseline-faithful implementation: Jaseempk
+### Best compact baseline-faithful kata: Jaseempk
 
 Jaseempk was the smallest leading implementation to pass all gates. It preserves
 unknowns, assigns statements to the innermost method, sorts deterministically,
@@ -157,29 +157,26 @@ unmatched coverage to numeric zero, did not sort worst-first by default, and
 included timestamps in JSON. It was in maintenance mode and GPL-3.0-or-later,
 so it is a design lesson rather than a source for the MIT implementation.
 
-## Language decision: Rust core and CLI
+## Language decision: TypeScript first
 
-Version 1 should use a Rust core and standalone CLI, with a thin npm wrapper.
+Version 1 should be TypeScript, not Rust.
 
-1. The primary product is a quality-gate tool, not an embedded TypeScript
-   library. A standalone binary makes its runtime independent of the consumer's
-   Node version, module system, and package manager.
-2. [Oxc](https://github.com/oxc-project/oxc/tree/main/crates/oxc_parser)
-   provides a high-performance Rust parser with TypeScript, TSX, JSX, modern
-   ECMAScript, error recovery, and accurate source locations. The tool requires
-   syntax structure rather than TypeScript type checking.
-3. Large repositories benefit from low startup overhead, bounded memory use,
-   and fast structural parsing even though semantic correctness remains the
-   first requirement.
-4. Rust produces a reusable core for CLI, CI, and future integrations without
-   making npm the execution architecture.
-5. The npm package can remain a small distribution layer that selects and
-   invokes a platform-specific prebuilt binary. It does not own analysis logic.
+1. The target grammar's canonical compiler API is directly available, avoiding
+   translation between Rust parser node semantics and TypeScript terminology.
+2. The users, fixtures, coverage artifacts, package managers, configuration,
+   source maps, and npm distribution are all TypeScript ecosystem concerns.
+3. A TypeScript implementation is easier to inspect, modify, and teach as an
+   architecture/testing kata.
+4. The comparative failures were predominantly semantic—unknown coverage,
+   nested attribution, policy, and orchestration—not demonstrated performance
+   bottlenecks that Rust would solve.
+5. Native binaries or napi bindings introduce platform builds, release
+   matrices, and debugging boundaries before there is evidence they are needed.
 
-The cost is a release matrix for supported operating systems and architectures.
-That cost is accepted as part of producing a dependable standalone tool. A
-direct binary download and checksums remain available for users who do not use
-npm.
+Rust remains a valid future adapter. Parser and coverage ports must use
+library-neutral domain values so an Oxc/napi implementation can replace the
+TypeScript parser after profiling, without moving scoring, reporting, threshold
+policy, or CLI behavior across the boundary.
 
 ## Conclusion for this repository
 
@@ -196,9 +193,8 @@ single candidate:
   gate exit behavior;
 - keep the domain focused on CRAP; do not mix unrelated code-quality heuristics
   into the core model;
-- implement the core and CLI in Rust with an Oxc source adapter;
-- distribute prebuilt binaries directly and through a thin npm wrapper with no
-  duplicate analysis logic.
+- implement in TypeScript first and retain a library-neutral parser port for a
+  future evidence-driven Rust accelerator.
 
 The highest-value black-box test seam is the packaged CLI: a fixture project and
 coverage artifact enter; deterministic stdout, stderr, structured report, and

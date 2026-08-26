@@ -29,14 +29,18 @@ Cargo-built binary instead.
 The CLI reads `crap4ts.json` (or `.crap4ts.json`/`crap4ts.config.json`) as
 strict JSON. A project can use an existing Istanbul artifact (the default), an
 LCOV tracefile (`--coverage-format lcov`), or a direct argv coverage command.
+Conventional tests and generated directories are excluded from discovery by
+default; `source_filters.include_tests` and
+`source_filters.include_generated` opt them in, while `.git` and
+`node_modules` remain permanently excluded.
 Generated commands are never shell-split; Windows `.cmd`/`.bat` shims are
 rejected, so use a native `.exe` (for example `node.exe` plus npm-cli.js) rather than
 `npm` in a command array. Generated coverage is deleted and recreated only
 inside the project root, and child output is forwarded to stderr.
 
 Use `--format text` for a terminal report or `--format json` for the stable
-versioned contract. Single-project output is [JSON schema v1](https://github.com/dearlordylord/crap4ts/blob/main/schemas/report-v1.schema.json);
-independent package groups use [schema v2](https://github.com/dearlordylord/crap4ts/blob/main/schemas/report-v2.schema.json).
+versioned contract. Single-project output is [JSON schema v1](https://github.com/dearlordylord/crap4ts/blob/master/schemas/report-v1.schema.json);
+independent package groups use [schema v2](https://github.com/dearlordylord/crap4ts/blob/master/schemas/report-v2.schema.json).
 Exit status `0` is a passing gate, `1` is invalid input/analysis failure, and
 `2` is a measured score above its threshold. Unknown coverage remains unknown;
 `--report-only` only keeps those rows in the report.

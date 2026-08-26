@@ -58,7 +58,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
       - name: Install locked npm dependencies
-        run: npm ci
+        run: npm ci --force
       - name: Check JavaScript syntax
         run: npm run lint:npm
       - name: Check versions and report schemas

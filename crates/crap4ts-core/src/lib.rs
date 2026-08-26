@@ -22,7 +22,7 @@ pub use domain::{
     GroupName, GroupRoot, ProjectRelativePath, Report, ReportGroup, ReportRow, SourceFile,
     SourcePosition, SourceRange, AGGREGATE_REPORT_VERSION, REPORT_VERSION,
 };
-pub use path::collect_sources;
+pub use path::{collect_sources, collect_sources_with_options, SourceSelectionOptions};
 pub use report::{render_json, render_text};
 
 #[cfg(test)]
