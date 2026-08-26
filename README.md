@@ -56,6 +56,12 @@ analysis failure, and `2` means a score strictly exceeded the configured
 threshold. JSON stdout contains only the versioned report; diagnostics and
 quality-gate messages use stderr.
 
+Source discovery accepts only project-local TypeScript identities, skips
+declaration and conventional test files, and rejects symlinked directories.
+Coverage entries must use the same canonical project-relative identity (or an
+absolute path inside `--project-root`); basename and unrelated-path guesses
+are rejected.
+
 ## License
 
 [MIT](./LICENSE)
