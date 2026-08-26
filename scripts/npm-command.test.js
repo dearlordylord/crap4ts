@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { npmInvocation } = require('./npm-command.js');
+const { verifyMetaPack } = require('./pack-platform.js');
 
 test('Windows npm subprocesses use node plus npm_execpath instead of spawning npm.cmd', () => {
   assert.deepEqual(
@@ -20,4 +21,16 @@ test('POSIX npm subprocesses invoke npm directly', () => {
 
 test('Windows npm subprocesses fail closed without the lifecycle CLI path', () => {
   assert.throws(() => npmInvocation('win32', 'node.exe', ''), /npm_execpath/);
+});
+
+test('Windows pack metadata may omit the launcher executable bit', () => {
+  assert.doesNotThrow(() => verifyMetaPack({
+    packageJson: {
+      name: '@crap4ts/crap4ts',
+      optionalDependencies: Object.fromEntries(
+        Object.values(require('../release-targets.json')).map(({ packageName }) => [packageName, '1.0.0']),
+      ),
+    },
+    metadata: { files: [{ path: 'bin/crap4ts.js', mode: 0o644 }] },
+  }, 'win32'));
 });
