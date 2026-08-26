@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { verifyRelease } = require('./release.js');
 const { targets } = require('./stage-platform.js');
+const { validateReport } = require('./validate-report.js');
 const crypto = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
@@ -40,6 +41,7 @@ function parseArgs(args) {
 function main() {
   const options = parseArgs(process.argv.slice(2));
   if (!options) return;
+  if (!options.binaryManifest) throw new Error('--binary-manifest is required for the publication gate');
   const marker = path.join(path.resolve(options.releaseDir), '.smoke.ok');
   if (!fs.existsSync(marker)) {
     throw new Error(`release smoke marker is missing: ${marker}`);
@@ -51,6 +53,9 @@ function main() {
   if (!fs.existsSync(reportFile)) throw new Error('release smoke report is missing');
   const reportDigest = crypto.createHash('sha256').update(fs.readFileSync(reportFile)).digest('hex');
   if (reportDigest !== smoke.directReportSha256) throw new Error('release smoke report digest mismatch');
+  const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
+  validateReport(report, 2);
+  if (!report.rows?.length || !report.rows.some((row) => row.coverage?.status === 'measured')) throw new Error('release smoke report has no measured result');
   const version = require('../package.json').version;
   const expectedNames = new Set(['crap4ts-' + version + '.tgz', ...Object.values(targets).map((d) => `${d.packageName.replace(/^@/, '').replace('/', '-')}-${version}.tgz`)]);
   if (Object.keys(smoke.packages).length !== expectedNames.size || Object.keys(smoke.packages).some((name) => !expectedNames.has(name))) throw new Error('release smoke marker must contain exactly six expected npm packages');

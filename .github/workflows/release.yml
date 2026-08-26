@@ -256,7 +256,11 @@ jobs:
             package="dist/release/npm/crap4ts-${target}-${version}.tgz"
             test -f "$package"
             name=$(node -p "require('./packages/crap4ts-' + '$target' + '/package.json').name")
-            url=$(npm view "$name@$version" dist.tarball --json 2>/dev/null || true)
+            err=$(mktemp)
+            if ! url=$(npm view "$name@$version" dist.tarball --json 2>"$err"); then
+              grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
+              url=null
+            fi
             if [ -z "$url" ] || [ "$url" = "null" ]; then
               npm publish "$package" --access public --provenance
             else
@@ -273,7 +277,11 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
           package="dist/release/npm/crap4ts-${version}.tgz"
-          url=$(npm view "crap4ts@$version" dist.tarball --json 2>/dev/null || true)
+          err=$(mktemp)
+          if ! url=$(npm view "crap4ts@$version" dist.tarball --json 2>"$err"); then
+            grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
+            url=null
+          fi
           if [ -z "$url" ] || [ "$url" = "null" ]; then
             npm publish "$package" --access public --provenance
           else
