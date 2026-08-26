@@ -12,12 +12,16 @@
   },
   "scripts": {
     "check:versions": "node scripts/check-versions.js",
-    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/stage-platform.js && node --check scripts/pack-platform.js && node --check scripts/npm-smoke.js",
+    "check:schemas": "node scripts/check-schemas.js",
+    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/check-schemas.js && node --check scripts/validate-report.js && node --check scripts/stage-platform.js && node --check scripts/pack-platform.js && node --check scripts/npm-smoke.js && node --check scripts/release.js && node --check scripts/release-gate.js",
     "lint": "npm run lint:npm",
     "pack:npm": "node scripts/pack-platform.js",
     "stage:npm": "node scripts/stage-platform.js",
     "smoke:npm": "node scripts/npm-smoke.js",
+    "release:assemble": "node scripts/release.js assemble",
+    "release:verify": "node scripts/release.js verify",
+    "release:gate": "node scripts/release-gate.js",
     "test:npm": "npm run test --workspace packages/crap4ts",
-    "test": "npm run check:versions && npm run test:npm"
+    "test": "npm run check:versions && npm run check:schemas && npm run test:npm"
   }
 }

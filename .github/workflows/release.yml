@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact semver tag to release (for example v0.1.0)
+        required: true
+        type: string
+      publish:
+        description: Upload verified assets and publish npm packages
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The five entries (linux-x64, linux-arm64, darwin-x64, darwin-arm64, and
+# win32-x64) are loaded from release-targets.json below; scripts use that same
+# file when staging and verifying package payloads.
+
+jobs:
+  target-matrix:
+    name: Read checked-in target map
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - id: targets
+        name: Export release targets
+        shell: bash
+        run: echo "matrix=$(node -e 'const targets=require(\"./release-targets.json\"); console.log(JSON.stringify(Object.entries(targets).map(([target, descriptor]) => ({target, ...descriptor}))));')" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: target-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.target-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Rust with fmt and clippy
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: ${{ matrix.rustTarget }}
+          components: rustfmt, clippy
+      - name: Install Node.js for metadata checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Build release binary
+        shell: bash
+        run: cargo build --locked --release -p crap4ts --target "${{ matrix.rustTarget }}"
+      - name: Native binary smoke
+        shell: bash
+        run: |
+          mkdir -p dist/binaries
+          binary="target/${{ matrix.rustTarget }}/release/${{ matrix.binaryName }}"
+          test -s "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
+          node scripts/check-versions.js --binary "$binary"
+          cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
+      - name: Upload target binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: dist/binaries/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble and verify release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: npm
+      - name: Install locked npm dependencies
+        run: npm ci
+      - name: Download every target binary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-binary-*
+          path: dist/binaries
+          merge-multiple: true
+      - name: Validate exact semver tag and versions
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          git fetch origin master --no-tags || true
+          git fetch origin main --no-tags || true
+          base_ref=origin/master
+          git rev-parse --verify --quiet "$base_ref" >/dev/null || base_ref=origin/main
+          git merge-base --is-ancestor HEAD "$base_ref"
+          npm run check:versions -- --tag "$RELEASE_TAG"
+      - name: Assemble standalone archives, npm packages, and checksums
+        run: node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
+      - name: Validate both JSON report contracts with the release binary
+        run: node scripts/check-schemas.js --binary dist/binaries/crap4ts-linux-x64
+      - name: Direct and packed npm mixed-workspace smoke
+        run: node scripts/npm-smoke.js --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
+      - name: Fail closed before publication
+        run: node scripts/release-gate.js --release-dir dist/release
+      - name: Upload verified release directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: crap4ts-release
+          path: dist/release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish verified assets
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: https://registry.npmjs.org
+      - name: Download verified release directory
+        uses: actions/download-artifact@v4
+        with:
+          name: crap4ts-release
+          path: dist/release
+      - name: Re-run publication gate
+        run: node scripts/release-gate.js --release-dir dist/release
+      - name: Publish native npm packages before meta-package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          test -n "$NODE_AUTH_TOKEN"
+          version=$(node -p "require('./package.json').version")
+          for target in $(node -e 'process.stdout.write(Object.keys(require("./release-targets.json")).sort().join(" "))'); do
+            package="dist/release/npm/crap4ts-${target}-${version}.tgz"
+            test -f "$package"
+            npm publish "$package" --access public
+          done
+      - name: Publish npm meta-package last
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          npm publish "dist/release/npm/crap4ts-${version}.tgz" --access public
+      - name: Upload standalone archives and checksums to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" dist/release/*.tar.gz dist/release/SHA256SUMS --clobber

@@ -246,6 +246,93 @@ the meta and host package, installs them in a temporary consumer, and invokes
 help plus fixture analysis. Issue #11 owns the cross-target release matrix and
 checksum/publishing automation.
 
+#### Direct release archives and checksums
+
+Every release publishes one archive per supported target. The names are
+unambiguous and include the semantic version and target:
+
+```text
+crap4ts-0.1.0-linux-x64.tar.gz
+crap4ts-0.1.0-linux-arm64.tar.gz
+crap4ts-0.1.0-darwin-x64.tar.gz
+crap4ts-0.1.0-darwin-arm64.tar.gz
+crap4ts-0.1.0-win32-x64.tar.gz
+```
+
+Each archive contains the native executable, `LICENSE`, and this README.
+`SHA256SUMS` covers exactly those five archives and the six npm tarballs;
+verify it before extracting an archive:
+
+```sh
+sha256sum -c SHA256SUMS
+```
+
+On Windows, use `Get-FileHash` and compare each SHA-256 value in
+`SHA256SUMS` before extracting.
+
+Linux binaries target glibc. Linux musl distributions and unsupported
+operating-system/CPU combinations should build from the Cargo workspace. The
+release target map is checked in at [`release-targets.json`](./release-targets.json)
+so archive names, npm package metadata, and workflow targets cannot drift.
+
+#### Configuration and coverage modes
+
+The analyzer accepts an existing artifact by default. Istanbul
+`coverage-final.json` is the default format; pass `--coverage-format lcov` for
+an LCOV tracefile. To generate fresh evidence, configure an argv array (or use
+`--coverage-command` with repeated `--coverage-arg` values). Arguments are
+passed directly and are never shell-split. On Windows, npm is a command shim,
+so generated configuration must use `npm.cmd`, for example
+`["npm.cmd", "test", "--", "--coverage"]`; this retains direct argv
+semantics and does not invoke a shell.
+
+Generated mode removes only the explicitly configured, project-local artifact,
+requires a newly created regular file, and forwards child stdout/stderr to
+stderr. Existing-artifact mode does not remove files or run a command.
+LCOV measures `DA` lines and cannot distinguish same-line functions; ambiguous
+attribution is reported as unknown/error instead of guessed. Istanbul ranges
+provide exact function and statement ownership. Unknown coverage is never
+converted into zero coverage.
+
+#### Reports and exits
+
+Text reports are intended for terminals. JSON stdout is deterministic and
+contains no timestamps or child-process noise. Single-project reports use
+[schema v1](./schemas/report-v1.schema.json); package-group reports use
+[schema v2](./schemas/report-v2.schema.json), with each row qualified by its
+group. `npm run check:schemas` validates both supported shapes.
+
+The process exits with `0` when analysis completes within policy, `1` for
+invalid input, configuration, parsing, execution, or missing-evidence errors,
+and `2` when a measured CRAP score is strictly greater than its effective
+threshold. `--report-only` keeps unknown rows visible but cannot give them a
+numeric score.
+
+#### Platform and release limitations
+
+The npm package is a launcher plus one optional native package selected by
+Node's `process.platform` and `process.arch`; it performs no postinstall
+download. Supported npm targets are Linux x64/arm64, macOS x64/arm64, and
+Windows x64. Optional dependencies must remain enabled for normal npm
+installation. The npm wrapper requires Node `>=20.19.0 <25` (Node 20, 22, or
+24 LTS). The CLI analyzes TypeScript/TSX only; JavaScript, raw V8 coverage,
+source-map reconstruction, SARIF/HTML, baseline ratchets, and changed-lines
+gates are outside v1.
+
+Maintainers can assemble and verify without publishing anything:
+
+```sh
+npm run check:versions
+npm run check:schemas
+node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
+node scripts/npm-smoke.js --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
+node scripts/release-gate.js --release-dir dist/release
+```
+
+The gate refuses a release with any missing target archive, checksum, npm
+package, required binary payload, or smoke marker. Publication is a separate
+workflow action and is never performed by these local commands.
+
 ## License
 
 [MIT](./LICENSE)

@@ -10,14 +10,17 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use serde::Deserialize;
 
 /// Declarative command configuration.
 ///
-/// The short form is an argv array, for example `['npm', 'test']`.  The
+/// The short form is an argv array, for example `['npm', 'test']` on POSIX
+/// (use `['npm.cmd', 'test']` on Windows). The
 /// object form is useful when a config author wants to make the program and
 /// arguments visually distinct: `{ "program": "npm", "args": ["test"] }`.
 /// Neither form invokes a shell.  A shell can still be used intentionally by
@@ -55,9 +58,10 @@ impl CommandSpec {
 }
 
 /// Run a configured coverage command and return the freshly generated UTF-8
-/// artifact.  All child stdout and stderr bytes are forwarded to the parent's
-/// stderr.  Keeping both pipes drained by `wait_with_output` avoids a child
-/// deadlock when a runner emits more than a pipe's capacity.
+/// artifact. All child stdout and stderr bytes are forwarded to the parent's
+/// stderr while the process is running. The readers use fixed-size buffers and
+/// are drained concurrently, so a noisy coverage runner cannot deadlock on a
+/// full pipe or accumulate an unbounded child-output allocation.
 pub(crate) fn generate(
     root: &Path,
     configured_artifact: &Path,
@@ -67,18 +71,46 @@ pub(crate) fn generate(
     let artifact = validate_artifact_path(root, configured_artifact)?;
     remove_existing_artifact(root, &artifact)?;
 
-    let mut command = Command::new(&argv[0]);
-    command.args(&argv[1..]).current_dir(root);
-    let output = command
-        .output()
+    let mut command = Command::new(command_program(&argv[0]));
+    command
+        .args(&argv[1..])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("coverage command failed to start '{}': {error}", argv[0]))?;
-    forward_output(&output).map_err(|error| {
-        format!("coverage command output could not be forwarded to stderr: {error}")
-    })?;
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "coverage command stdout pipe was not available".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "coverage command stderr pipe was not available".to_string())?;
+
+    // A separate reader is required for each pipe: waiting for one stream to
+    // finish before reading the other lets a child that writes enough output
+    // to fill the second pipe block forever. A short-lived mutex keeps each
+    // fixed-size write intact when both streams are active at once.
+    let stderr_sink = Arc::new(Mutex::new(()));
+    let stdout_sink = Arc::clone(&stderr_sink);
+    let stdout_thread = thread::spawn(move || stream_output(stdout, stdout_sink));
+    let stderr_thread = thread::spawn(move || stream_output(stderr, stderr_sink));
+    let status = child
+        .wait()
+        .map_err(|error| format!("coverage command could not be waited on: {error}"))?;
+    let stdout_result = join_stream_thread(stdout_thread);
+    let stderr_result = join_stream_thread(stderr_thread);
+    if let Err(error) = stdout_result.and(stderr_result) {
+        return Err(format!(
+            "coverage command output could not be forwarded to stderr: {error}"
+        ));
+    }
+    if !status.success() {
         return Err(format!(
             "coverage command failed with {}",
-            status_description(&output)
+            status_description(status)
         ));
     }
 
@@ -98,21 +130,52 @@ pub(crate) fn validate_command(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn status_description(output: &Output) -> String {
-    output.status.code().map_or_else(
+#[cfg(windows)]
+fn command_program(program: &str) -> &str {
+    // Windows npm exposes a command shim (`npm.cmd`) rather than a native
+    // executable. Command is intentionally still invoked without a shell;
+    // callers should name the shim explicitly in configuration. This helper
+    // exists as a single platform seam for tests and future executable
+    // resolution without changing argv boundaries.
+    program
+}
+
+#[cfg(not(windows))]
+fn command_program(program: &str) -> &str {
+    program
+}
+
+fn status_description(status: ExitStatus) -> String {
+    status.code().map_or_else(
         || "termination by signal".to_string(),
         |code| format!("exit status {code}"),
     )
 }
 
-fn forward_output(output: &Output) -> io::Result<()> {
-    let stderr = io::stderr();
-    let mut handle = stderr.lock();
-    // Preserve bytes exactly.  Child stdout is intentionally sent to the
-    // parent's stderr so JSON stdout remains a single report document.
-    handle.write_all(&output.stdout)?;
-    handle.write_all(&output.stderr)?;
-    handle.flush()
+fn stream_output<R: Read>(mut reader: R, sink: Arc<Mutex<()>>) -> io::Result<()> {
+    // Keep this buffer deliberately bounded. The parent stderr remains the
+    // destination, preserving raw child bytes while JSON stdout stays clean.
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            return Ok(());
+        }
+        let _guard = sink
+            .lock()
+            .map_err(|_| io::Error::other("coverage output sink lock poisoned"))?;
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
+        handle.write_all(&buffer[..bytes_read])?;
+        handle.flush()?;
+    }
+}
+
+fn join_stream_thread(thread: thread::JoinHandle<io::Result<()>>) -> io::Result<()> {
+    match thread.join() {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other("coverage output reader thread panicked")),
+    }
 }
 
 fn read_fresh_artifact(root: &Path, artifact: &Path) -> Result<String, String> {
@@ -419,6 +482,20 @@ mod tests {
             spec.into_argv().unwrap(),
             ["tool with spaces", "argument;not-shell-code"]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_specs_name_npm_cmd_without_shell_rewriting() {
+        let spec = CommandSpec::Argv(vec![
+            "npm.cmd".to_string(),
+            "test".to_string(),
+            "--".to_string(),
+            "--coverage".to_string(),
+        ]);
+        let argv = spec.into_argv().unwrap();
+        assert_eq!(argv[0], "npm.cmd");
+        assert_eq!(command_program(&argv[0]), "npm.cmd");
     }
 
     #[test]
