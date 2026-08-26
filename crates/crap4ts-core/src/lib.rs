@@ -153,4 +153,172 @@ mod tests {
             "src/file.ts"
         );
     }
+
+    #[test]
+    fn inspect_issue_three_units() {
+        let source = r#"
+const variableArrow = (value: boolean) => value ? value && value : false;
+const variableFunction = function (value: number) { return value; };
+const explicitFunction = function namedFunction(value: number) { return value; };
+const object = {
+    method() { if (true) return 1; },
+    get getter() { return 1; },
+    set setter(value: number) { this.value = value; },
+    functionProperty: function (value: number) { return value; },
+    arrowProperty: (value: number) => value ? value : 0,
+    [(() => {})]() { return 1; },
+};
+class Example {
+    constructor() { return; }
+    static method() { return 1; }
+    get value() { return 1; }
+    set value(next: number) { this.next = next; }
+    field = () => 1;
+    ["computed"]() { return 1; }
+}
+function outer() {
+    if (true) {
+        const callback = (value: boolean) => {
+            if (value) return value && value;
+            return false;
+        };
+        return callback;
+    }
+    return undefined;
+}
+function decisions(value: any) {
+    if (value) return;
+    for (let index = 0; index < 1; index += 1) {}
+    for (const key in value) {}
+    for (const item of value) {}
+    while (value) break;
+    do { break; } while (value);
+    try { return value; } catch (error) { return error; }
+    switch (value) { case 1: break; case 2: break; default: break; }
+    const conditional = value ? value : 0;
+    value &&= value;
+    value ||= value;
+    value ??= value;
+    return value && value || (value ?? value);
+}
+async function asyncFunction() { return 1; }
+function* generator() { yield 1; }
+function overload(value: string): string;
+function overload(value: number): number;
+function overload(value: unknown): unknown { return value; }
+declare function ambient(): void;
+interface Interface { run(): void; }
+abstract class Abstract { abstract run(): void; }
+        "#;
+        let path = ProjectRelativePath::new("fixture.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let summary: Vec<(&str, FunctionKind, u32)> = units
+            .iter()
+            .map(|unit| (unit.name.as_str(), unit.kind, unit.complexity.get()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("variableArrow", FunctionKind::Arrow, 3),
+                ("variableFunction", FunctionKind::FunctionExpression, 1),
+                ("namedFunction", FunctionKind::FunctionExpression, 1),
+                ("method", FunctionKind::Method, 2),
+                ("getter", FunctionKind::Getter, 1),
+                ("setter", FunctionKind::Setter, 1),
+                ("functionProperty", FunctionKind::FunctionExpression, 1),
+                ("arrowProperty", FunctionKind::Arrow, 2),
+                ("<anonymous>@11:6", FunctionKind::Arrow, 1),
+                ("<anonymous>@11:16", FunctionKind::Method, 1),
+                ("constructor", FunctionKind::Constructor, 1),
+                ("method", FunctionKind::Method, 1),
+                ("value", FunctionKind::Getter, 1),
+                ("value", FunctionKind::Setter, 1),
+                ("field", FunctionKind::Arrow, 1),
+                ("computed", FunctionKind::Method, 1),
+                ("outer", FunctionKind::FunctionDeclaration, 2),
+                ("callback", FunctionKind::Arrow, 3),
+                ("decisions", FunctionKind::FunctionDeclaration, 17),
+                ("asyncFunction", FunctionKind::FunctionDeclaration, 1),
+                ("generator", FunctionKind::FunctionDeclaration, 1),
+                ("overload", FunctionKind::FunctionDeclaration, 1),
+            ]
+        );
+        assert_eq!(units.len(), 22);
+    }
+
+    #[test]
+    fn tsx_generics_decorators_and_nested_jsx_callbacks_are_structural() {
+        let source = r#"
+type Item<T> = { value: T };
+const Component = <T,>(props: Item<T>) => (
+    <section onClick={() => props.value}>{props.value}</section>
+);
+function sealed() { return () => 1; }
+@sealed
+class Decorated {
+    @sealed
+    async *method() { yield 1; }
+}
+"#;
+        let path = ProjectRelativePath::new("fixture.tsx").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let summary: Vec<(&str, FunctionKind, u32)> = units
+            .iter()
+            .map(|unit| (unit.name.as_str(), unit.kind, unit.complexity.get()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("Component", FunctionKind::Arrow, 1),
+                ("onClick", FunctionKind::Arrow, 1),
+                ("sealed", FunctionKind::FunctionDeclaration, 1),
+                ("<anonymous>@6:27", FunctionKind::Arrow, 1),
+                ("method", FunctionKind::Method, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn inferred_names_cover_wrappers_destructuring_and_assignments() {
+        let source = r#"
+const wrapped = ((value: number) => value) as (value: number) => number;
+const named = function explicit() { return 1; };
+const { defaulted = () => 1 } = {};
+function parameters(callback = () => 1) { return callback; }
+let assigned;
+assigned = () => 1;
+const object = { ["literal"]: () => 1 };
+object.member = function () { return 1; };
+"#;
+        let path = ProjectRelativePath::new("fixture.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let summary: Vec<(&str, FunctionKind)> = units
+            .iter()
+            .map(|unit| (unit.name.as_str(), unit.kind))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("wrapped", FunctionKind::Arrow),
+                ("explicit", FunctionKind::FunctionExpression),
+                ("defaulted", FunctionKind::Arrow),
+                ("parameters", FunctionKind::FunctionDeclaration),
+                ("callback", FunctionKind::Arrow),
+                ("assigned", FunctionKind::Arrow),
+                ("literal", FunctionKind::Arrow),
+                ("member", FunctionKind::FunctionExpression),
+            ]
+        );
+    }
+
+    #[test]
+    fn class_auto_accessor_arrow_initializer_is_named() {
+        let source = "class Example { accessor callback = () => 1; }\n";
+        let path = ProjectRelativePath::new("fixture.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].name, "callback");
+        assert_eq!(units[0].kind, FunctionKind::Arrow);
+        assert_eq!(units[0].complexity, Complexity::one());
+    }
 }

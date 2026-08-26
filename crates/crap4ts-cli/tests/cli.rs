@@ -280,6 +280,77 @@ fn built_in_test_file_exclusion_keeps_reportable_sources_only() {
     assert_eq!(report["rows"][0]["name"], "greet");
 }
 
+#[test]
+fn issue_three_tsx_fixture_reports_all_units_and_complexity() {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "crap4ts-cli-issue-three-{}-{id}",
+        std::process::id()
+    ));
+    fs::create_dir_all(root.join("src")).expect("create fixture");
+    fs::write(
+        root.join("src/issue-three.tsx"),
+        include_str!("fixtures/issue-three.tsx"),
+    )
+    .expect("write source");
+    fs::write(root.join("coverage-final.json"), b"{}").expect("write coverage");
+
+    let output = Command::new(binary())
+        .current_dir(&root)
+        .args([
+            "--coverage",
+            "coverage-final.json",
+            "--format",
+            "json",
+            "--report-only",
+            "src/issue-three.tsx",
+        ])
+        .output()
+        .expect("run crap4ts");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
+    let rows = report["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 18);
+    assert!(rows
+        .iter()
+        .all(|row| row["coverage"]["status"] == "unknown"));
+
+    let assert_row = |name: &str, kind: &str, complexity: u64| {
+        let row = rows
+            .iter()
+            .find(|row| row["name"] == name && row["kind"] == kind)
+            .unwrap_or_else(|| panic!("missing {kind} {name}"));
+        assert_eq!(row["complexity"], complexity, "{kind} {name}");
+    };
+    assert_row("Component", "arrow", 1);
+    assert_row("onClick", "arrow", 1);
+    assert_row("declaration", "function_declaration", 3);
+    assert_row("expression", "function_expression", 1);
+    assert_row("method", "method", 2);
+    assert_row("getter", "getter", 1);
+    assert_row("setter", "setter", 1);
+    assert_row("expressionProperty", "function_expression", 1);
+    assert_row("arrowProperty", "arrow", 1);
+    assert_row("constructor", "constructor", 1);
+    assert_row("value", "getter", 1);
+    assert_row("value", "setter", 1);
+    assert_row("field", "arrow", 1);
+    assert_row("decisions", "function_declaration", 18);
+    assert_row("asynchronous", "function_declaration", 1);
+    assert_row("generator", "function_declaration", 1);
+    assert_row("overloaded", "function_declaration", 1);
+    assert!(!rows.iter().any(|row| row["name"] == "ambient"));
+    assert!(!rows.iter().any(|row| row["name"] == "run"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[test]
 fn symlink_directory_cycle_is_rejected_without_recursing() {
