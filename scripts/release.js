@@ -188,7 +188,8 @@ function assertArchiveHasOnlyRegularFiles(archive, expected, executableEntry) {
   }
   if (executableEntry) {
     const line = listing.split(/\r?\n/).find((entry) => entry.endsWith(` ${executableEntry}`));
-    if (!line || !/^-[rwx-]{10}\s/.test(line) || !/^-[rwx-]*x[rwx-]*\s/.test(line)) throw new Error(`${archive} executable payload is not mode-executable`);
+    const mode = line?.trim().split(/\s+/)[0];
+    if (!line || mode?.length !== 10 || mode[0] !== '-' || !/x/.test(mode.slice(1))) throw new Error(`${archive} executable payload is not mode-executable`);
   }
   assert.deepEqual(archiveEntries(archive), expected, `${archive} contains unexpected or missing entries`);
 }
