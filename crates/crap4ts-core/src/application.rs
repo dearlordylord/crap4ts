@@ -1,6 +1,6 @@
 //! Application pipeline and quality-gate policy.
 
-use std::{cmp::Ordering, path::Path};
+use std::{cmp::Ordering, collections::BTreeMap, path::Path};
 
 use crate::{
     coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
@@ -18,6 +18,71 @@ pub fn crap_score(complexity: Complexity, coverage: f64) -> Result<f64, CoreErro
     }
     let cc = f64::from(complexity.get());
     Ok(cc * cc * (1.0 - coverage).powi(3) + cc)
+}
+
+/// Threshold policy used by the application quality gate.
+///
+/// Thresholds are resolved by exact normalized project-relative path.  A
+/// path-specific value takes precedence over the global value; no glob or
+/// basename matching is performed.  Keeping this policy separate from
+/// [`crap_score`] means changing the quality bar cannot change the score
+/// calculation itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThresholdPolicy {
+    global: u32,
+    per_path: BTreeMap<crate::domain::ProjectRelativePath, u32>,
+}
+
+impl ThresholdPolicy {
+    /// Construct a policy with a global threshold and no path overrides.
+    pub fn new(global: u32) -> Self {
+        Self {
+            global,
+            per_path: BTreeMap::new(),
+        }
+    }
+
+    /// Add or replace the exact threshold for a project-relative path.
+    pub fn with_path_override(
+        mut self,
+        path: crate::domain::ProjectRelativePath,
+        threshold: u32,
+    ) -> Self {
+        self.per_path.insert(path, threshold);
+        self
+    }
+
+    /// Return the global threshold.
+    pub const fn global(&self) -> u32 {
+        self.global
+    }
+
+    /// Return the effective threshold for one normalized project path.
+    pub fn threshold_for(&self, path: &crate::domain::ProjectRelativePath) -> u32 {
+        self.per_path.get(path).copied().unwrap_or(self.global)
+    }
+
+    /// Return whether any measured row strictly exceeds its effective
+    /// threshold. Unknown rows are intentionally ignored.
+    pub fn gate_breached(&self, report: &Report) -> bool {
+        self.gate_breached_rows(&report.rows)
+    }
+
+    /// Return whether any row in a slice strictly exceeds its effective
+    /// threshold. This form is used while assembling a report, before the
+    /// report value itself has been constructed.
+    pub fn gate_breached_rows(&self, rows: &[ReportRow]) -> bool {
+        rows.iter().any(|row| {
+            row.crap
+                .is_some_and(|score| score > f64::from(self.threshold_for(&row.path)))
+        })
+    }
+
+    /// Expose overrides in deterministic path order for callers that need to
+    /// inspect or serialize the resolved policy.
+    pub fn path_overrides(&self) -> &BTreeMap<crate::domain::ProjectRelativePath, u32> {
+        &self.per_path
+    }
 }
 
 /// Analyze using a current-directory root. This convenience API keeps source
@@ -46,19 +111,46 @@ pub fn analyze_with_root(
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
     let coverage = make_coverage_adapter(CoverageFormat::Istanbul, coverage_json, root)?;
-    analyze_with_adapter(sources, coverage.as_ref(), threshold, allow_unknown)
+    analyze_with_adapter_and_policy(
+        sources,
+        coverage.as_ref(),
+        &ThresholdPolicy::new(threshold),
+        allow_unknown,
+    )
+}
+
+/// Analyze source files with an Istanbul artifact and exact path thresholds.
+pub fn analyze_with_policy(
+    sources: &[SourceFile],
+    coverage_json: &str,
+    root: &Path,
+    policy: &ThresholdPolicy,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
+    let coverage = make_coverage_adapter(CoverageFormat::Istanbul, coverage_json, root)?;
+    analyze_with_adapter_and_policy(sources, coverage.as_ref(), policy, allow_unknown)
 }
 
 /// Analyze source files with an already constructed coverage adapter.
-///
-/// Parsing and format-specific attribution stay behind [`CoverageAdapter`].
-/// This is the common application path for Istanbul, LCOV, and future
-/// adapters; scoring, gate policy, and renderers consume only normalized
-/// [`Coverage`] values.
 pub fn analyze_with_adapter(
     sources: &[SourceFile],
     coverage_adapter: &dyn CoverageAdapter,
     threshold: u32,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
+    analyze_with_adapter_and_policy(
+        sources,
+        coverage_adapter,
+        &ThresholdPolicy::new(threshold),
+        allow_unknown,
+    )
+}
+
+/// Common application pipeline for every coverage adapter and gate policy.
+pub fn analyze_with_adapter_and_policy(
+    sources: &[SourceFile],
+    coverage_adapter: &dyn CoverageAdapter,
+    policy: &ThresholdPolicy,
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
     let mut units = Vec::new();
@@ -116,13 +208,20 @@ pub fn analyze_with_adapter(
     }
 
     rows.sort_by(compare_rows);
-    if rows
-        .iter()
-        .any(|row| row.crap.is_some_and(|score| score > threshold as f64))
-    {
+    if policy.gate_breached_rows(&rows) {
         diagnostics.push(Diagnostic::new(
             DiagnosticCategory::ThresholdBreach,
-            format!("one or more CRAP scores exceed the threshold of {threshold}"),
+            if policy.path_overrides().is_empty() {
+                format!(
+                    "one or more CRAP scores exceed the threshold of {}",
+                    policy.global()
+                )
+            } else {
+                format!(
+                    "one or more CRAP scores exceed the effective threshold (global {})",
+                    policy.global()
+                )
+            },
         ));
     }
     diagnostics.sort_by(|left, right| {
@@ -132,7 +231,7 @@ pub fn analyze_with_adapter(
     });
     Ok(Report {
         version: crate::domain::REPORT_VERSION,
-        threshold,
+        threshold: policy.global(),
         rows,
         diagnostics,
     })
@@ -148,7 +247,12 @@ pub fn analyze_with_root_and_format(
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
     let adapter = make_coverage_adapter(format, coverage_input, root)?;
-    analyze_with_adapter(sources, adapter.as_ref(), threshold, allow_unknown)
+    analyze_with_adapter_and_policy(
+        sources,
+        adapter.as_ref(),
+        &ThresholdPolicy::new(threshold),
+        allow_unknown,
+    )
 }
 
 fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
@@ -159,7 +263,9 @@ fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
-            .then_with(|| left.name.cmp(&right.name)),
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id)),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => left
@@ -167,7 +273,9 @@ fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
             .cmp(&right.path)
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
-            .then_with(|| left.name.cmp(&right.name)),
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id)),
     }
 }
 
@@ -224,5 +332,16 @@ mod tests {
             rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
             ["b.ts", "a.ts", "z.ts"]
         );
+    }
+
+    #[test]
+    fn threshold_policy_uses_exact_paths_and_strict_comparison() {
+        let path = crate::domain::ProjectRelativePath::new("src/a.ts").unwrap();
+        let other = crate::domain::ProjectRelativePath::new("src/b.ts").unwrap();
+        let policy = ThresholdPolicy::new(8).with_path_override(path.clone(), 1);
+        assert_eq!(policy.threshold_for(&path), 1);
+        assert_eq!(policy.threshold_for(&other), 8);
+        assert!(!policy.gate_breached_rows(&[row("src/a.ts", Some(1.0))]));
+        assert!(policy.gate_breached_rows(&[row("src/a.ts", Some(1.000_001))]));
     }
 }

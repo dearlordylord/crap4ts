@@ -12,7 +12,8 @@ mod report;
 mod source;
 
 pub use application::{
-    analyze, analyze_with_adapter, analyze_with_root, analyze_with_root_and_format, crap_score,
+    analyze, analyze_with_adapter, analyze_with_adapter_and_policy, analyze_with_policy,
+    analyze_with_root, analyze_with_root_and_format, crap_score, ThresholdPolicy,
 };
 pub use coverage::{coverage_adapter, make_coverage_adapter, CoverageAdapter, CoverageFormat};
 pub use domain::{
