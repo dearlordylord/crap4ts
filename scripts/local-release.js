@@ -12,7 +12,6 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const targets = require('../release-targets.json');
-const { npmInvocation } = require('./npm-command.js');
 
 const root = path.resolve(__dirname, '..');
 const META_PACKAGE_NAME = '@crap4ts/crap4ts';
@@ -64,17 +63,22 @@ function releaseCommandInvocation(
   args,
   platform = process.platform,
   execPath = process.execPath,
+  packageManagerPath = process.env.npm_execpath,
 ) {
   if (platform === 'win32' && name === 'npm') {
-    const npmCli = path.win32.join(
-      path.win32.dirname(execPath),
-      'node_modules',
-      'npm',
-      'bin',
-      'npm-cli.js',
-    );
-    const npm = npmInvocation(platform, execPath, npmCli);
-    return { command: npm.command, args: [...npm.argsPrefix, ...args], spawnOptions: {} };
+    if (!packageManagerPath) throw new Error('npm_execpath is required for Windows local release');
+    const manager = path.win32.basename(packageManagerPath).toLowerCase();
+    if (manager.includes('pnpm')) {
+      return {
+        command: execPath,
+        args: [packageManagerPath, 'exec', 'npm', ...args],
+        spawnOptions: {},
+      };
+    }
+    if (manager.includes('npm-cli')) {
+      return { command: execPath, args: [packageManagerPath, ...args], spawnOptions: {} };
+    }
+    throw new Error(`unsupported Windows package manager CLI ${packageManagerPath}`);
   }
   return { command: name, args, spawnOptions: {} };
 }

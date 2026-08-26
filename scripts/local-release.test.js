@@ -52,10 +52,16 @@ test('missing assets cannot be added to an already-published GitHub release', ()
   assert.throws(() => requireDraftForUpload(false, 'SHA256SUMS'), /already published/);
 });
 
-test('local release invokes npm through its Windows command shim', () => {
-  assert.deepEqual(releaseCommandInvocation('npm', ['whoami'], 'win32', 'C:\\node\\node.exe'), {
+test('local release delegates npm through the actual Windows package manager CLI', () => {
+  assert.deepEqual(releaseCommandInvocation(
+    'npm',
+    ['whoami'],
+    'win32',
+    'C:\\node\\node.exe',
+    'C:\\pnpm\\pnpm.cjs',
+  ), {
     command: 'C:\\node\\node.exe',
-    args: ['C:\\node\\node_modules\\npm\\bin\\npm-cli.js', 'whoami'],
+    args: ['C:\\pnpm\\pnpm.cjs', 'exec', 'npm', 'whoami'],
     spawnOptions: {},
   });
 });

@@ -107,7 +107,7 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
   const npm = npmInvocation();
   run(
     npm.command,
-    [...npm.argsPrefix, 'install', '--ignore-scripts', '--offline', '--omit=optional', '--no-audit', '--no-fund'],
+    [...npm.argsPrefix, 'install', '--ignore-scripts', '--offline', '--no-audit', '--no-fund'],
     consumer,
   );
 
@@ -122,6 +122,10 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
     'crap4ts.js',
   );
   const invocation = (args) => npmBinInvocation(executable, launcher, args);
+  if (process.platform === 'win32') {
+    assert.ok(fs.statSync(executable).isFile(), 'npm did not create the Windows crap4ts.cmd shim');
+    assert.match(fs.readFileSync(executable, 'utf8'), /crap4ts\.js/);
+  }
   const helpCommand = invocation(['--help']);
   const help = run(helpCommand.command, helpCommand.args, consumer, helpCommand.spawnOptions);
   assert.match(help.stdout, /Usage: crap4ts/);

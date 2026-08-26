@@ -143,11 +143,9 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         shell: bash
         run: |
-          git fetch origin master --no-tags || true
-          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          git fetch origin main --no-tags || true
+          git fetch origin master --no-tags
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           base_ref=origin/master
-          git rev-parse --verify --quiet "$base_ref" >/dev/null || base_ref=origin/main
           test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse "$base_ref^{commit}")"
           npm run check:versions -- --tag "$RELEASE_TAG"
@@ -222,11 +220,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          if gh release view "$RELEASE_TAG" --json isDraft,tagName >/tmp/existing-release.json 2>/dev/null; then
+          release_error=$(mktemp)
+          if gh release view "$RELEASE_TAG" --json isDraft,tagName >/tmp/existing-release.json 2>"$release_error"; then
             test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).isDraft")" = "true"
             test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).tagName")" = "$RELEASE_TAG"
             test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
           else
+            grep -Eqi 'release not found|HTTP 404|404 Not Found' "$release_error" || { cat "$release_error" >&2; exit 1; }
             gh release create "$RELEASE_TAG" --draft --verify-tag --title "crap4ts $RELEASE_TAG" --notes "Automated release; assets are gated below."
           fi
       - name: Reconcile GitHub assets (resumable, immutable)
@@ -237,7 +237,13 @@ jobs:
         run: |
           set -euo pipefail
           remote_json=$(gh release view "$RELEASE_TAG" --json assets)
-          node -e 'const {classify,assertSafe}=require("./scripts/publication-plan.js"); const fs=require("fs"); const remote=JSON.parse(process.argv[1]).assets.reduce((m,a)=>(m[a.name]=(a.digest||"").replace(/^sha256:/,""),m),{}); const files=process.argv.slice(2).map(path=>({name:require("path").basename(path),path})); const names=new Set(files.map(x=>x.name)); for(const name of Object.keys(remote)) if(!names.has(name)) throw new Error("unexpected stale release asset "+name); const plan=assertSafe(classify(files,remote)); fs.writeFileSync("/tmp/release-plan.json",JSON.stringify(plan));' "$remote_json" dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS
+          remote_dir=$(mktemp -d)
+          node -e 'for(const a of JSON.parse(process.argv[1]).assets) if(!a.digest) console.log(a.name)' "$remote_json" > /tmp/missing-release-digests.txt
+          while IFS= read -r name; do
+            test -n "$name" || continue
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$remote_dir"
+          done < /tmp/missing-release-digests.txt
+          node -e 'const {classify,assertSafe,digest}=require("./scripts/publication-plan.js"); const fs=require("fs"),path=require("path"); const remoteDir=process.argv[2]; const remote=JSON.parse(process.argv[1]).assets.reduce((m,a)=>(m[a.name]=a.digest?(a.digest.replace(/^sha256:/,"")):digest(path.join(remoteDir,a.name)),m),{}); const files=process.argv.slice(3).map(file=>({name:path.basename(file),path:file})); const names=new Set(files.map(x=>x.name)); for(const name of Object.keys(remote)) if(!names.has(name)) throw new Error("unexpected stale release asset "+name); const plan=assertSafe(classify(files,remote)); fs.writeFileSync("/tmp/release-plan.json",JSON.stringify(plan));' "$remote_json" "$remote_dir" dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS
           node -e 'for(const x of require("/tmp/release-plan.json")) if(x.action === "publish") console.log(x.name)' > /tmp/release-publish.txt
           for file in dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS; do
             name=$(basename "$file")
