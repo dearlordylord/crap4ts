@@ -91,14 +91,18 @@ jobs:
           $binary = (Resolve-Path "target\${{ matrix.rustTarget }}\release\${{ matrix.binaryName }}").Path
           $fixture = Join-Path $env:RUNNER_TEMP 'crap4ts-generated-smoke'
           New-Item -ItemType Directory -Force $fixture | Out-Null
-          Set-Content (Join-Path $fixture 'coverage-template.json') '{"version":3,"file":"x.js","fnMap":{},"fn":{"f":1},"statementMap":{},"s":{"s":1},"branchMap":{},"b":{}}'
+          Set-Content (Join-Path $fixture 'coverage-template.json') '{"version":3,"file":"src/index.ts","fnMap":{"0":{"name":"smoke","decl":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}},"loc":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}}}},"f":{"0":1},"statementMap":{"0":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}}},"s":{"0":1},"branchMap":{},"b":{}}'
           $config = '{"coverage_command":{"program":"node.exe","args":["-e","const fs=require(''fs''); const [marker,src,dst]=process.argv.slice(1); if(marker!==''hostile argument ; *'') process.exit(7); fs.copyFileSync(src,dst);","hostile argument ; *","coverage-template.json","coverage-final.json"]}}'
           New-Item -ItemType Directory -Force (Join-Path $fixture 'src') | Out-Null
           Set-Content (Join-Path $fixture 'src/index.ts') 'export function smoke() { return 1; }'
           Set-Content (Join-Path $fixture '.crap4ts.json') $config
           Push-Location $fixture
-          & $binary --coverage coverage-final.json src/index.ts --format json | Out-Null
-          Pop-Location
+          try {
+            $output = & $binary --coverage coverage-final.json src/index.ts --format json
+            $report = $output | ConvertFrom-Json
+            if ($report.version -ne 1 -or $report.rows.Count -lt 1 -or $report.rows[0].path -ne 'src/index.ts') { throw "native Windows generated-mode report assertion failed" }
+            if (-not (Test-Path (Join-Path $fixture 'coverage-final.json'))) { throw "generated artifact missing" }
+          } finally { Pop-Location }
           if ($LASTEXITCODE -ne 0) { throw "native Windows generated-mode smoke failed" }
       - name: Upload target binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -224,7 +228,7 @@ jobs:
           const files = fs.readdirSync('dist/release').filter((n) => n.endsWith('.tar.gz') || n === 'SHA256SUMS').map((n) => ({ name: n, path: `dist/release/${n}` }));
           assertSafe(classify(files, {}));
           NODE
-          for file in dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/npm/NPM-SHA256SUMS; do
+          for file in dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS; do
             name=$(basename "$file")
             remote=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$name\") | .digest" || true)
             local="sha256:$(sha256sum "$file" | awk '{print $1}')"

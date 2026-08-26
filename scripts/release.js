@@ -226,7 +226,21 @@ function writeManifest(files, manifest) {
 }
 
 function writeBinaryManifest(binaryDirectory, manifest) {
-  const lines = targetNames.map((target) => `${hashFile(binaryForTarget(binaryDirectory, target))}  ${target}`).sort();
+  const sidecars = fs.readdirSync(binaryDirectory).filter((name) => name.endsWith('.sha256')).sort();
+  assert.deepEqual(sidecars, targetNames.map((target) => `${target}.sha256`).sort(), 'build digest sidecars must contain exactly five targets');
+  const seen = new Set();
+  const lines = targetNames.map((target) => {
+    const sidecar = path.join(binaryDirectory, `${target}.sha256`);
+    ensureRegularFile(sidecar, `${target} build digest sidecar`);
+    const content = fs.readFileSync(sidecar, 'utf8').trim();
+    const match = content.match(/^([a-f0-9]{64})  ([a-z0-9-]+)$/);
+    if (!match || match[2] !== target || seen.has(target)) throw new Error(`invalid ${target} build digest sidecar`);
+    seen.add(target);
+    const source = binaryForTarget(binaryDirectory, target);
+    if (hashFile(source) !== match[1]) throw new Error(`${target} build digest does not match source binary`);
+    return `${match[1]}  ${target}`;
+  }).sort();
+  if (seen.size !== REQUIRED_TARGETS.length) throw new Error('build digest sidecars must contain exactly five targets');
   fs.writeFileSync(manifest, `${lines.join('\n')}\n`);
 }
 

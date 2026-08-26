@@ -22,7 +22,7 @@
     "release:verify": "node scripts/release.js verify",
     "release:gate": "node scripts/release-gate.js",
     "test:npm": "npm run test --workspace packages/crap4ts",
-    "test": "npm run check:versions && npm run check:schemas && npm run test:npm"
+    "test": "npm run check:versions && npm run check:schemas && npm run test:npm && node --test scripts/publication-plan.test.js"
   },
   "devDependencies": {
     "ajv": "^8.20.0"
