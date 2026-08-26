@@ -148,11 +148,20 @@ fn source_identity_is_canonical_for_redundant_path_segments() {
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }
 
-#[cfg(windows)]
 #[test]
 fn source_identity_accepts_windows_separators() {
     let fixture = Fixture::new();
     let output = run_with_source(&fixture, &["--format", "json"], &[r"src\fixture.ts"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
+}
+
+#[cfg(windows)]
+#[test]
+fn source_identity_accepts_posix_separators_on_windows() {
+    let fixture = Fixture::new();
+    let output = run_with_source(&fixture, &["--format", "json"], &["src/fixture.ts"]);
     assert_eq!(output.status.code(), Some(0));
     let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");

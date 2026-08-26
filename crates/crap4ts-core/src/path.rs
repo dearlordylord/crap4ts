@@ -78,9 +78,16 @@ fn resolve_requested_path(root: &Path, requested: &Path) -> Result<PathBuf, Core
         ));
     }
 
-    // Keep the operating system's native path representation intact. In
+    // Keep absolute filesystem paths in their native representation. In
     // particular, Windows drive and verbatim prefixes must reach canonicalize
-    // unchanged; separator normalization belongs only to project identities.
+    // unchanged. Relative CLI/config paths may use either conventional
+    // separator, so translate only those components before joining them to
+    // the native project root.
+    let requested = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        normalize_relative_path(requested)?
+    };
     let path = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -105,6 +112,21 @@ fn resolve_requested_path(root: &Path, requested: &Path) -> Result<PathBuf, Core
     // when their resolved target remains within the root.
     reject_symlink_directories(&path)?;
     Ok(canonical)
+}
+
+fn normalize_relative_path(path: &Path) -> Result<PathBuf, CoreError> {
+    let value = path.to_str().ok_or_else(|| {
+        CoreError::SourceSelection(format!(
+            "source path '{}' is not valid UTF-8",
+            path.display()
+        ))
+    })?;
+    let normalized = if std::path::MAIN_SEPARATOR == '/' {
+        value.replace('\\', "/")
+    } else {
+        value.replace('/', "\\")
+    };
+    Ok(PathBuf::from(normalized))
 }
 
 fn collect_path(
