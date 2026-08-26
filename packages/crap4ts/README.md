@@ -45,7 +45,8 @@ The native target set is Linux x64/arm64 (glibc), macOS x64/arm64, and Windows
 x64. The npm wrapper contains no analyzer implementation and does not download
 executables at install time. JavaScript sources, raw V8 coverage, source-map
 reconstruction, HTML/SARIF reports, baselines, and changed-lines gates are not
-part of v1. Standalone release archives and their `SHA256SUMS` manifest are
+part of v1. Standalone release archives, `SHA256SUMS`, and the separate
+`npm/NPM-SHA256SUMS` manifest are
 available for users who do not use npm.
 
 For operators installing from a release archive, choose the archive whose name
