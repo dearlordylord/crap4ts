@@ -302,14 +302,6 @@ pub struct Report {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-impl Report {
-    pub fn gate_breached(&self) -> bool {
-        self.rows
-            .iter()
-            .any(|row| row.crap.is_some_and(|score| score > self.threshold as f64))
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("unsupported source extension for '{0}' (expected .ts or .tsx)")]

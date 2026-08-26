@@ -6,17 +6,133 @@
 //! values are merged with command-line options by `main`.
 
 use std::{
-    collections::BTreeMap,
-    fs, io,
+    collections::{BTreeMap, HashSet},
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
 use clap::ValueEnum;
 use crap4ts_core::{ProjectRelativePath, ThresholdPolicy};
-use serde::Deserialize;
-
+use serde::{
+    de::{self, Visitor},
+    Deserialize, Deserializer,
+};
 pub(crate) const DEFAULT_CONFIG_FILE: &str = "crap4ts.json";
 pub(crate) const DEFAULT_THRESHOLD: u32 = 8;
+
+/// Deserialize an optional field while rejecting an explicit JSON `null`.
+/// `#[serde(default)]` still supplies `None` when the field is absent.
+fn reject_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .ok_or_else(|| de::Error::custom("null is not permitted; omit the field instead"))
+        .map(Some)
+}
+
+struct DuplicateKeyVisitor;
+
+impl<'de> Visitor<'de> for DuplicateKeyVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON data without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<(), E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(de::Error::custom(format!(
+                    "duplicate JSON object key '{key}'"
+                )));
+            }
+            map.next_value_seed(DuplicateKeySeed)?;
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<(), A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        while sequence.next_element_seed(DuplicateKeySeed)?.is_some() {}
+        Ok(())
+    }
+}
+
+struct DuplicateKeySeed;
+
+impl<'de> de::DeserializeSeed<'de> for DuplicateKeySeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateKeyVisitor)
+    }
+}
+
+fn reject_duplicate_keys(input: &[u8]) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(input);
+    deserializer.deserialize_any(DuplicateKeyVisitor)?;
+    deserializer.end()
+}
 
 /// Output format accepted by both the configuration file and the CLI.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
@@ -38,9 +154,9 @@ enum MissingEvidencePolicy {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReportConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     format: Option<OutputFormat>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     json: Option<bool>,
 }
 
@@ -48,7 +164,7 @@ struct ReportConfig {
 #[serde(deny_unknown_fields)]
 struct CoverageDetails {
     path: PathBuf,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     format: Option<String>,
 }
 
@@ -126,13 +242,13 @@ impl ThresholdOverrides {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ThresholdDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     global: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     default: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     paths: Option<ThresholdOverrides>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     overrides: Option<ThresholdOverrides>,
 }
 
@@ -182,39 +298,87 @@ impl ThresholdConfig {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     sources: Option<PathList>,
-    #[serde(default, alias = "source-paths", alias = "sourcePaths")]
+    #[serde(
+        default,
+        alias = "source-paths",
+        alias = "sourcePaths",
+        deserialize_with = "reject_null"
+    )]
     source: Option<PathList>,
-    #[serde(default, alias = "sourceRoots", alias = "source-roots")]
+    #[serde(
+        default,
+        alias = "sourceRoots",
+        alias = "source-roots",
+        deserialize_with = "reject_null"
+    )]
     source_roots: Option<PathList>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     coverage: Option<CoverageConfig>,
-    #[serde(default, alias = "coverageFile", alias = "coverage-file")]
+    #[serde(
+        default,
+        alias = "coverageFile",
+        alias = "coverage-file",
+        deserialize_with = "reject_null"
+    )]
     coverage_file: Option<PathBuf>,
-    #[serde(default, alias = "coverageFormat", alias = "coverage-format")]
+    #[serde(
+        default,
+        alias = "coverageFormat",
+        alias = "coverage-format",
+        deserialize_with = "reject_null"
+    )]
     coverage_format: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     format: Option<OutputFormat>,
-    #[serde(default, alias = "reportFormat", alias = "report-format")]
+    #[serde(
+        default,
+        alias = "reportFormat",
+        alias = "report-format",
+        deserialize_with = "reject_null"
+    )]
     report_format: Option<OutputFormat>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     json: Option<bool>,
-    #[serde(default, alias = "output")]
+    #[serde(default, alias = "output", deserialize_with = "reject_null")]
     report: Option<ReportConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     reports: Option<ReportConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "reject_null")]
     threshold: Option<u32>,
-    #[serde(default, alias = "threshold-overrides")]
+    #[serde(
+        default,
+        alias = "threshold-overrides",
+        deserialize_with = "reject_null"
+    )]
     thresholds: Option<ThresholdConfig>,
-    #[serde(default, alias = "thresholdOverrides")]
+    #[serde(
+        default,
+        alias = "thresholdOverrides",
+        deserialize_with = "reject_null"
+    )]
     threshold_overrides: Option<ThresholdOverrides>,
-    #[serde(default, alias = "reportOnly", alias = "report-only")]
+    #[serde(
+        default,
+        alias = "reportOnly",
+        alias = "report-only",
+        deserialize_with = "reject_null"
+    )]
     report_only: Option<bool>,
-    #[serde(default, alias = "missingEvidence", alias = "missing-evidence")]
+    #[serde(
+        default,
+        alias = "missingEvidence",
+        alias = "missing-evidence",
+        deserialize_with = "reject_null"
+    )]
     missing_evidence: Option<MissingEvidencePolicy>,
-    #[serde(default, alias = "missingCoverage", alias = "missing-coverage")]
+    #[serde(
+        default,
+        alias = "missingCoverage",
+        alias = "missing-coverage",
+        deserialize_with = "reject_null"
+    )]
     missing_coverage: Option<MissingEvidencePolicy>,
 }
 
@@ -418,6 +582,12 @@ pub(crate) fn load(path: &Path, root: &Path) -> Result<ConfigValues, String> {
             path.display()
         )
     })?;
+    reject_duplicate_keys(&bytes).map_err(|error| {
+        format!(
+            "configuration: invalid declarative config '{}': {error}",
+            path.display()
+        )
+    })?;
     let parsed: FileConfig = serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "configuration: invalid declarative config '{}': {error}",
@@ -452,6 +622,20 @@ mod tests {
             serde_json::from_str::<FileConfig>(r#"{"coverage":"coverage.json","run":"echo"}"#)
                 .expect_err("unknown executable field must fail");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn duplicate_json_keys_are_rejected_before_schema_decoding() {
+        let error = reject_duplicate_keys(br#"{"threshold":1,"threshold":2}"#)
+            .expect_err("duplicate keys must fail");
+        assert!(error.to_string().contains("duplicate JSON object key"));
+    }
+
+    #[test]
+    fn explicit_null_does_not_activate_a_defaulted_option() {
+        let error = serde_json::from_str::<FileConfig>(r#"{"threshold":null}"#)
+            .expect_err("null threshold must fail");
+        assert!(error.to_string().contains("null is not permitted"));
     }
 
     #[test]

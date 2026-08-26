@@ -720,6 +720,35 @@ fn discovered_config_is_strict_and_data_only() {
 }
 
 #[test]
+fn config_rejects_duplicate_keys_and_explicit_nulls() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root.join("crap4ts.json");
+    fs::write(
+        &config_path,
+        br#"{"coverage":"coverage-final.json","thresholds":{"src/fixture.ts":1,"src/fixture.ts":2}}"#,
+    )
+    .unwrap();
+    let duplicate = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run duplicate-key config");
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("duplicate JSON object key"));
+
+    fs::write(
+        &config_path,
+        br#"{"coverage":"coverage-final.json","threshold":null}"#,
+    )
+    .unwrap();
+    let null = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run null config");
+    assert_eq!(null.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&null.stderr).contains("null is not permitted"));
+}
+
+#[test]
 fn config_report_only_retains_unknown_rows_without_a_score() {
     let fixture = Fixture::new();
     fs::write(fixture.root.join("coverage-final.json"), b"{}").unwrap();
