@@ -22,7 +22,7 @@
     "@crap4ts/win32-x64": "0.1.0"
   },
   "scripts": {
-    "pretest": "node ../../scripts/stage-test-binary.js",
+    "pretest": "node ../../scripts/npm-smoke.js",
     "test": "node --test test/npm.test.js"
   }
 }

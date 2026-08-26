@@ -77,6 +77,23 @@ The supported Node.js range is `>=20.19.0 <25`, covering the maintained Node
 `npm run check:versions`. The committed `package-lock.json` pins the npm
 workspace's package relationships.
 
+Maintainers package a prebuilt binary rather than downloading one during npm
+installation. For example, a host release artifact can be staged and checked
+with:
+
+```sh
+cargo build --release -p crap4ts
+node scripts/stage-platform.js --target linux-arm64 --binary target/release/crap4ts
+npm run pack:npm -- --target linux-arm64 --binary target/release/crap4ts
+```
+
+The staging command validates the target's declared `bin` path, and the pack
+command fails unless the resulting tarball contains an executable payload. The
+clean host archive smoke is run by `npm test`; it builds release mode, packs
+the meta and host package, installs them in a temporary consumer, and invokes
+help plus fixture analysis. Issue #11 owns the cross-target release matrix and
+checksum/publishing automation.
+
 Source discovery accepts only project-local TypeScript identities, skips
 declaration and conventional test files, and rejects symlinked directories.
 Coverage entries must use the same canonical project-relative identity (or an

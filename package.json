@@ -5,22 +5,18 @@
   "description": "Development workspace for the crap4ts Rust CLI and npm distribution",
   "license": "MIT",
   "workspaces": [
-    "packages/crap4ts"
+    "packages/*"
   ],
-  "overrides": {
-    "@crap4ts/darwin-arm64": "file:../crap4ts-darwin-arm64",
-    "@crap4ts/darwin-x64": "file:../crap4ts-darwin-x64",
-    "@crap4ts/linux-arm64": "file:../crap4ts-linux-arm64",
-    "@crap4ts/linux-x64": "file:../crap4ts-linux-x64",
-    "@crap4ts/win32-x64": "file:../crap4ts-win32-x64"
-  },
   "engines": {
     "node": ">=20.19.0 <25"
   },
   "scripts": {
     "check:versions": "node scripts/check-versions.js",
-    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/stage-test-binary.js",
+    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/stage-platform.js && node --check scripts/pack-platform.js && node --check scripts/npm-smoke.js",
     "lint": "npm run lint:npm",
+    "pack:npm": "node scripts/pack-platform.js",
+    "stage:npm": "node scripts/stage-platform.js",
+    "smoke:npm": "node scripts/npm-smoke.js",
     "test:npm": "npm run test --workspace packages/crap4ts",
     "test": "npm run check:versions && npm run test:npm"
   }

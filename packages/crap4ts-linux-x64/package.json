@@ -11,5 +11,6 @@
   ],
   "files": [
     "bin"
-  ]
+  ],
+  "crap4tsBinary": "bin/crap4ts"
 }
