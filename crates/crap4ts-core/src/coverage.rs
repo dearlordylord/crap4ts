@@ -1,7 +1,8 @@
-//! Istanbul JSON adapter and exclusive source-range attribution.
+//! Coverage adapters and exclusive source-range attribution.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, str::FromStr};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::domain::{
@@ -9,15 +10,65 @@ use crate::domain::{
     SourceFile, SourcePosition, SourceRange,
 };
 
+mod lcov;
+
+/// Coverage artifact formats understood by the application boundary.
+///
+/// The enum deliberately lives in the library rather than the CLI so config
+/// loaders and future integrations use the same vocabulary and cannot drift
+/// into format-specific branches in scoring or report code.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverageFormat {
+    /// Istanbul's `coverage-final.json` shape.
+    #[serde(rename = "istanbul", alias = "istanbul-json", alias = "json")]
+    #[default]
+    Istanbul,
+    /// The line-oriented LCOV tracefile format.
+    #[serde(rename = "lcov", alias = "LCOV")]
+    Lcov,
+}
+
+impl CoverageFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Istanbul => "istanbul",
+            Self::Lcov => "lcov",
+        }
+    }
+}
+
+impl FromStr for CoverageFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "istanbul" | "istanbul-json" | "json" => Ok(Self::Istanbul),
+            "lcov" => Ok(Self::Lcov),
+            _ => Err(format!(
+                "unsupported coverage format '{value}' (expected istanbul or lcov)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CoverageFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IstanbulCoverage {
     files: BTreeMap<ProjectRelativePath, IstanbulFile>,
 }
 
-/// Normalized coverage boundary consumed by scoring. A second format such as
-/// LCOV can implement this contract without changing the application or
-/// renderers.
-pub(crate) trait CoverageAdapter {
+/// Normalized coverage boundary consumed by scoring.
+///
+/// Implementations validate their artifact and answer coverage queries using
+/// only library-neutral domain values. The application never branches on the
+/// concrete report format after construction.
+pub trait CoverageAdapter {
     fn validate_for_source(
         &self,
         path: &ProjectRelativePath,
@@ -37,6 +88,28 @@ pub(crate) trait CoverageAdapter {
         source: &str,
         units: &[FunctionUnit],
     ) -> Result<Option<Coverage>, CoreError>;
+}
+
+/// Parse an artifact using the selected format and construct the normalized
+/// coverage adapter consumed by [`crate::analyze_with_adapter`].
+pub fn make_coverage_adapter(
+    format: CoverageFormat,
+    input: &str,
+    root: &Path,
+) -> Result<Box<dyn CoverageAdapter>, CoreError> {
+    match format {
+        CoverageFormat::Istanbul => Ok(Box::new(IstanbulCoverage::parse(input, root)?)),
+        CoverageFormat::Lcov => Ok(Box::new(lcov::LcovCoverage::parse(input, root)?)),
+    }
+}
+
+/// Alias with a noun-first name for callers that prefer a factory-style API.
+pub fn coverage_adapter(
+    format: CoverageFormat,
+    input: &str,
+    root: &Path,
+) -> Result<Box<dyn CoverageAdapter>, CoreError> {
+    make_coverage_adapter(format, input, root)
 }
 
 #[derive(Debug)]

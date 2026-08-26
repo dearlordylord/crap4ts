@@ -3,7 +3,7 @@
 use std::{cmp::Ordering, collections::BTreeMap, path::Path};
 
 use crate::{
-    coverage::{CoverageAdapter, IstanbulCoverage},
+    coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
     domain::{
         Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportRow,
         SourceFile,
@@ -110,17 +110,16 @@ pub fn analyze_with_root(
     threshold: u32,
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
-    analyze_with_policy(
+    let coverage = make_coverage_adapter(CoverageFormat::Istanbul, coverage_json, root)?;
+    analyze_with_adapter_and_policy(
         sources,
-        coverage_json,
-        root,
+        coverage.as_ref(),
         &ThresholdPolicy::new(threshold),
         allow_unknown,
     )
 }
 
-/// Analyze source files with a global threshold and deterministic exact path
-/// overrides.
+/// Analyze source files with an Istanbul artifact and exact path thresholds.
 pub fn analyze_with_policy(
     sources: &[SourceFile],
     coverage_json: &str,
@@ -128,8 +127,32 @@ pub fn analyze_with_policy(
     policy: &ThresholdPolicy,
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
-    let coverage = IstanbulCoverage::parse(coverage_json, root)?;
-    let coverage_adapter: &dyn CoverageAdapter = &coverage;
+    let coverage = make_coverage_adapter(CoverageFormat::Istanbul, coverage_json, root)?;
+    analyze_with_adapter_and_policy(sources, coverage.as_ref(), policy, allow_unknown)
+}
+
+/// Analyze source files with an already constructed coverage adapter.
+pub fn analyze_with_adapter(
+    sources: &[SourceFile],
+    coverage_adapter: &dyn CoverageAdapter,
+    threshold: u32,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
+    analyze_with_adapter_and_policy(
+        sources,
+        coverage_adapter,
+        &ThresholdPolicy::new(threshold),
+        allow_unknown,
+    )
+}
+
+/// Common application pipeline for every coverage adapter and gate policy.
+pub fn analyze_with_adapter_and_policy(
+    sources: &[SourceFile],
+    coverage_adapter: &dyn CoverageAdapter,
+    policy: &ThresholdPolicy,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
     let mut units = Vec::new();
     for source_file in sources {
         units.extend(source::analyze_source(
@@ -156,9 +179,15 @@ pub fn analyze_with_policy(
                 format!("missing coverage evidence for '{}': {reason}", unit.id),
             ));
             if !allow_unknown {
+                diagnostics.sort_by(|left, right| {
+                    left.category
+                        .cmp(&right.category)
+                        .then_with(|| left.message.cmp(&right.message))
+                });
                 return Err(CoreError::MissingEvidence {
                     path: unit.path.to_string(),
                     reason: reason.clone(),
+                    diagnostics: diagnostics.clone(),
                 });
             }
         }
@@ -206,6 +235,24 @@ pub fn analyze_with_policy(
         rows,
         diagnostics,
     })
+}
+
+/// Analyze an artifact after selecting its coverage format.
+pub fn analyze_with_root_and_format(
+    sources: &[SourceFile],
+    coverage_input: &str,
+    root: &Path,
+    format: CoverageFormat,
+    threshold: u32,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
+    let adapter = make_coverage_adapter(format, coverage_input, root)?;
+    analyze_with_adapter_and_policy(
+        sources,
+        adapter.as_ref(),
+        &ThresholdPolicy::new(threshold),
+        allow_unknown,
+    )
 }
 
 fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {

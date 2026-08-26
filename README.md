@@ -42,16 +42,18 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The binary consumes an existing Istanbul `coverage-final.json` artifact and
-accepts one or more TypeScript source files or project-relative source roots.
-Sources can be positional or supplied repeatedly with `--source` (also
-available as `--source-root`):
+The binary consumes an existing Istanbul `coverage-final.json` or LCOV
+tracefile artifact and accepts one or more TypeScript source files or
+project-relative source roots. Istanbul is the default; select LCOV explicitly
+with `--coverage-format lcov`. Sources can be positional or supplied
+repeatedly with `--source` (also available as `--source-root`):
 
 ```sh
 cargo run -p crap4ts -- --help
 cargo run -p crap4ts -- --coverage coverage-final.json src --format text
 cargo run -p crap4ts -- --coverage coverage-final.json src --format json --threshold 8
 cargo run -p crap4ts -- --coverage coverage-final.json --source src --source lib
+cargo run -p crap4ts -- --coverage lcov.info --coverage-format lcov src
 ```
 
 The same inputs can be supplied by a project-local `crap4ts.json` file (the
@@ -82,6 +84,23 @@ then explicitly supplied CLI options. The default global threshold is `8`,
 and a gate fails only when a measured score is strictly greater than its
 effective global or path threshold. `--config PATH` selects a configuration
 explicitly; its file must remain inside `--project-root`.
+
+Both formats normalize coverage to the same measured-or-unknown model. For
+LCOV, each `DA:<line>,<hits>` record is one denominator unit and a line is a
+numerator unit when its hit count is greater than zero. Thus `DA` records with
+zero hits are measured zero coverage, while a function with no attributable
+`DA` records remains unknown. LCOV has line locations but no columns or
+function end ranges: when one line could belong to multiple source functions,
+the report keeps those rows unknown and emits a structured coverage-attribution
+diagnostic instead of guessing.
+
+LCOV parsing is strict: the supported tracefile records are `TN`, `SF`,
+`FN`, `FNDA`, `FNF`, `FNH`, `DA`, `LF`, `LH`, `BRDA`, `BRF`, `BRH`, and
+`end_of_record`. Unknown or malformed records fail as coverage-parsing
+errors. Function and line summaries are checked against their records. Branch
+records are syntax-validated and intentionally ignored for attribution; their
+locations are not used to invent columns or function end ranges. Attribution
+is based on `DA` lines only.
 
 Exit status `0` means the quality gate passed, `1` means invalid input or
 analysis failure, and `2` means a score strictly exceeded the configured

@@ -1,6 +1,6 @@
 //! Library-neutral core for the crap4ts quality gate.
 //!
-//! Module boundaries keep filesystem selection, Oxc source analysis, Istanbul
+//! Module boundaries keep filesystem selection, Oxc source analysis, coverage
 //! normalization, scoring policy, and report rendering independent. Only
 //! normalized domain values cross those boundaries.
 
@@ -12,8 +12,10 @@ mod report;
 mod source;
 
 pub use application::{
-    analyze, analyze_with_policy, analyze_with_root, crap_score, ThresholdPolicy,
+    analyze, analyze_with_adapter, analyze_with_adapter_and_policy, analyze_with_policy,
+    analyze_with_root, analyze_with_root_and_format, crap_score, ThresholdPolicy,
 };
+pub use coverage::{coverage_adapter, make_coverage_adapter, CoverageAdapter, CoverageFormat};
 pub use domain::{
     Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionKind, FunctionUnit,
     ProjectRelativePath, Report, ReportRow, SourceFile, SourcePosition, SourceRange,

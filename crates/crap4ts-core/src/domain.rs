@@ -265,7 +265,7 @@ pub enum DiagnosticCategory {
 }
 
 impl DiagnosticCategory {
-    pub(crate) const fn as_label(self) -> &'static str {
+    pub const fn as_label(self) -> &'static str {
         match self {
             Self::Configuration => "configuration",
             Self::CoverageAttribution => "coverage_attribution",
@@ -317,7 +317,14 @@ pub enum CoreError {
     #[error("invalid project-relative path '{0}'")]
     InvalidProjectPath(String),
     #[error("missing coverage evidence for '{path}': {reason}")]
-    MissingEvidence { path: String, reason: String },
+    MissingEvidence {
+        path: String,
+        reason: String,
+        /// Diagnostics collected before strict missing-evidence policy
+        /// stopped analysis. The CLI uses these to preserve attribution
+        /// context in structured stderr.
+        diagnostics: Vec<Diagnostic>,
+    },
     #[error("complexity must be positive, got {0}")]
     InvalidComplexity(u32),
     #[error("invalid coverage counts: covered={covered}, total={total}")]
@@ -326,4 +333,15 @@ pub enum CoreError {
     InvalidCoverageFraction(f64),
     #[error("coverage artifact contains ambiguous file identity '{0}'")]
     AmbiguousCoverageFile(String),
+}
+
+impl CoreError {
+    /// Diagnostics accumulated before a strict policy error was returned.
+    /// Other errors have no completed-analysis diagnostics.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        match self {
+            Self::MissingEvidence { diagnostics, .. } => diagnostics,
+            _ => &[],
+        }
+    }
 }

@@ -12,7 +12,7 @@ use std::{
 };
 
 use clap::ValueEnum;
-use crap4ts_core::{ProjectRelativePath, ThresholdPolicy};
+use crap4ts_core::{CoverageFormat, ProjectRelativePath, ThresholdPolicy};
 use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
@@ -165,7 +165,7 @@ struct ReportConfig {
 struct CoverageDetails {
     path: PathBuf,
     #[serde(default, deserialize_with = "reject_null")]
-    format: Option<String>,
+    format: Option<CoverageFormat>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +176,7 @@ enum CoverageConfig {
 }
 
 impl CoverageConfig {
-    fn into_parts(self) -> (PathBuf, Option<String>) {
+    fn into_parts(self) -> (PathBuf, Option<CoverageFormat>) {
         match self {
             Self::Path(path) => (path, None),
             Self::Details(details) => (details.path, details.format),
@@ -329,7 +329,7 @@ struct FileConfig {
         alias = "coverage-format",
         deserialize_with = "reject_null"
     )]
-    coverage_format: Option<String>,
+    coverage_format: Option<CoverageFormat>,
     #[serde(default, deserialize_with = "reject_null")]
     format: Option<OutputFormat>,
     #[serde(
@@ -387,7 +387,7 @@ struct FileConfig {
 pub(crate) struct ConfigValues {
     pub(crate) sources: Option<Vec<PathBuf>>,
     pub(crate) coverage: Option<PathBuf>,
-    pub(crate) coverage_format: Option<String>,
+    pub(crate) coverage_format: Option<CoverageFormat>,
     pub(crate) format: Option<OutputFormat>,
     pub(crate) json: Option<bool>,
     pub(crate) threshold: Option<u32>,

@@ -1,0 +1,3 @@
+function same() {
+  return "a";
+}

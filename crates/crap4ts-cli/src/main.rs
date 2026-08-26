@@ -8,14 +8,17 @@ use std::{
 
 use clap::{error::ErrorKind, Parser};
 use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
-use crap4ts_core::{analyze_with_policy, collect_sources, render_json, render_text};
+use crap4ts_core::{
+    analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter, render_json,
+    render_text, CoverageFormat, Diagnostic,
+};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "crap4ts",
     version,
     about = "Calculate CRAP complexity risk for TypeScript functions",
-    long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON artifact."
+    long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON or LCOV artifact."
 )]
 struct Cli {
     /// Optional project-local JSON configuration file. If omitted, crap4ts.json
@@ -31,6 +34,10 @@ struct Cli {
         value_name = "PATH"
     )]
     coverage: Option<PathBuf>,
+
+    /// Coverage artifact format. Configuration may provide this value.
+    #[arg(long = "coverage-format", value_name = "FORMAT")]
+    coverage_format: Option<CoverageFormat>,
 
     /// Render a human-readable report or the versioned JSON report.
     #[arg(short = 'f', long = "format", value_name = "FORMAT")]
@@ -84,24 +91,63 @@ fn run() -> i32 {
 
     match execute(&cli) {
         Ok(status) => status,
-        Err(message) => {
-            render_failure(&message, cli.json || cli.format == Some(OutputFormat::Json));
+        Err(failure) => {
+            render_failure(
+                &failure.message,
+                cli.json || cli.format == Some(OutputFormat::Json),
+                &failure.diagnostics,
+            );
             1
         }
     }
 }
 
-fn render_failure(message: &str, json_output: bool) {
+#[derive(Debug)]
+struct CliFailure {
+    message: String,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl From<String> for CliFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+fn render_failure(message: &str, json_output: bool, diagnostics: &[Diagnostic]) {
     let category = diagnostic_category(message);
     if json_output {
+        let entries = if diagnostics.is_empty() {
+            vec![serde_json::json!({"category": category, "message": message})]
+        } else {
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    serde_json::to_value(diagnostic).expect("diagnostic is serializable")
+                })
+                .collect()
+        };
         let document = serde_json::json!({
-            "diagnostics": [{"category": category, "message": message}]
+            "diagnostics": entries
         });
         // JSON stdout remains reserved for completed versioned reports.
         eprintln!("{}", document);
     } else {
         eprintln!("error: {message}");
-        eprintln!("diagnostic [{category}]: {message}");
+        if diagnostics.is_empty() {
+            eprintln!("diagnostic [{category}]: {message}");
+        } else {
+            for diagnostic in diagnostics {
+                eprintln!(
+                    "diagnostic [{}]: {}",
+                    diagnostic.category.as_label(),
+                    diagnostic.message
+                );
+            }
+        }
     }
 }
 
@@ -121,7 +167,7 @@ fn diagnostic_category(message: &str) -> &'static str {
     }
 }
 
-fn execute(cli: &Cli) -> Result<i32, String> {
+fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     let root_hint = cli
         .project_root
         .as_deref()
@@ -147,10 +193,18 @@ fn execute(cli: &Cli) -> Result<i32, String> {
     }
     let sources = collect_sources(&root, &requested).map_err(|error| error.to_string())?;
     if sources.is_empty() {
-        return Err("configuration: source selection produced no TypeScript files".to_string());
+        return Err(
+            "configuration: source selection produced no TypeScript files"
+                .to_string()
+                .into(),
+        );
     }
 
     let format = resolved_format(cli, &values);
+    let coverage_format = cli
+        .coverage_format
+        .or(values.coverage_format)
+        .unwrap_or_default();
     let threshold = cli
         .threshold
         .or(values.threshold)
@@ -162,7 +216,6 @@ fn execute(cli: &Cli) -> Result<i32, String> {
     } else {
         values.report_only.unwrap_or(false)
     };
-    validate_coverage_format(values.coverage_format.as_deref())?;
     let policy = config::policy(&values, threshold);
 
     let coverage_path = if coverage.is_absolute() {
@@ -176,8 +229,16 @@ fn execute(cli: &Cli) -> Result<i32, String> {
             coverage_path.display()
         )
     })?;
-    let report = analyze_with_policy(&sources, &coverage, &root, &policy, report_only)
-        .map_err(|error| error.to_string())?;
+    let adapter =
+        make_coverage_adapter(coverage_format, &coverage, &root).map_err(|error| CliFailure {
+            message: error.to_string(),
+            diagnostics: error.diagnostics().to_vec(),
+        })?;
+    let report = analyze_with_adapter_and_policy(&sources, adapter.as_ref(), &policy, report_only)
+        .map_err(|error| CliFailure {
+            message: error.to_string(),
+            diagnostics: error.diagnostics().to_vec(),
+        })?;
 
     if format == OutputFormat::Json {
         let document = render_json(&report)
@@ -195,7 +256,7 @@ fn execute(cli: &Cli) -> Result<i32, String> {
     }
 }
 
-fn load_config(cli: &Cli, root: &Path) -> Result<ConfigValues, String> {
+fn load_config(cli: &Cli, root: &Path) -> Result<ConfigValues, CliFailure> {
     let path = if let Some(path) = &cli.config {
         Some(resolve_config_argument(path)?)
     } else {
@@ -205,6 +266,7 @@ fn load_config(cli: &Cli, root: &Path) -> Result<ConfigValues, String> {
         || Ok(ConfigValues::default()),
         |path| config::load(&path, root),
     )
+    .map_err(Into::into)
 }
 
 fn resolve_config_argument(path: &Path) -> Result<PathBuf, String> {
@@ -226,18 +288,6 @@ fn resolved_format(cli: &Cli, values: &ConfigValues) -> OutputFormat {
     } else {
         values.format.unwrap_or_default()
     }
-}
-
-fn validate_coverage_format(format: Option<&str>) -> Result<(), String> {
-    if let Some(format) = format {
-        let normalized = format.trim().to_ascii_lowercase();
-        if !matches!(normalized.as_str(), "istanbul" | "istanbul-json" | "json") {
-            return Err(format!(
-                "configuration: unsupported coverage format '{format}' on this build"
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn canonicalize_path(path: &Path, description: &str) -> Result<PathBuf, String> {
