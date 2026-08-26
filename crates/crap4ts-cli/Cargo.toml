@@ -1,0 +1,16 @@
+[package]
+name = "crap4ts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A Rust-based CRAP metric quality gate for TypeScript projects"
+
+[[bin]]
+name = "crap4ts"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+crap4ts-core = { path = "../crap4ts-core" }
+serde_json.workspace = true
