@@ -1,0 +1,28 @@
+{
+  "name": "crap4ts",
+  "version": "0.1.0",
+  "description": "A thin npm launcher for the crap4ts TypeScript CRAP quality gate",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "crap4ts": "bin/crap4ts.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19.0 <25"
+  },
+  "optionalDependencies": {
+    "@crap4ts/darwin-arm64": "0.1.0",
+    "@crap4ts/darwin-x64": "0.1.0",
+    "@crap4ts/linux-arm64": "0.1.0",
+    "@crap4ts/linux-x64": "0.1.0",
+    "@crap4ts/win32-x64": "0.1.0"
+  },
+  "scripts": {
+    "pretest": "node ../../scripts/stage-test-binary.js",
+    "test": "node --test test/npm.test.js"
+  }
+}

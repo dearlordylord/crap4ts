@@ -56,6 +56,27 @@ analysis failure, and `2` means a score strictly exceeded the configured
 threshold. JSON stdout contains only the versioned report; diagnostics and
 quality-gate messages use stderr.
 
+### npm distribution
+
+The npm distribution is a thin launcher around the same standalone binary:
+
+```sh
+npm install --save-dev crap4ts
+npx crap4ts --help
+```
+
+The meta-package selects an optional native package for Linux x64/arm64,
+macOS x64/arm64, or Windows x64. It forwards command-line arguments, standard
+streams, signals, and the native process status. It has no postinstall network
+download and contains no analysis implementation. A missing optional package
+or unsupported platform is reported with an actionable error; unsupported
+platforms can use a Cargo-built binary.
+
+The supported Node.js range is `>=20.19.0 <25`, covering the maintained Node
+20, 22, and 24 LTS lines. npm and Rust package versions are checked together by
+`npm run check:versions`. The committed `package-lock.json` pins the npm
+workspace's package relationships.
+
 Source discovery accepts only project-local TypeScript identities, skips
 declaration and conventional test files, and rejects symlinked directories.
 Coverage entries must use the same canonical project-relative identity (or an

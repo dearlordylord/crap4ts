@@ -1,0 +1,27 @@
+{
+  "name": "crap4ts-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development workspace for the crap4ts Rust CLI and npm distribution",
+  "license": "MIT",
+  "workspaces": [
+    "packages/crap4ts"
+  ],
+  "overrides": {
+    "@crap4ts/darwin-arm64": "file:../crap4ts-darwin-arm64",
+    "@crap4ts/darwin-x64": "file:../crap4ts-darwin-x64",
+    "@crap4ts/linux-arm64": "file:../crap4ts-linux-arm64",
+    "@crap4ts/linux-x64": "file:../crap4ts-linux-x64",
+    "@crap4ts/win32-x64": "file:../crap4ts-win32-x64"
+  },
+  "engines": {
+    "node": ">=20.19.0 <25"
+  },
+  "scripts": {
+    "check:versions": "node scripts/check-versions.js",
+    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/stage-test-binary.js",
+    "lint": "npm run lint:npm",
+    "test:npm": "npm run test --workspace packages/crap4ts",
+    "test": "npm run check:versions && npm run test:npm"
+  }
+}
