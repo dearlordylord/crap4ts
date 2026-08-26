@@ -1,12 +1,14 @@
 mod config;
+mod generation;
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process,
 };
 
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, ArgAction, Parser};
 use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
 use crap4ts_core::{
     analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter, render_json,
@@ -18,7 +20,7 @@ use crap4ts_core::{
     name = "crap4ts",
     version,
     about = "Calculate CRAP complexity risk for TypeScript functions",
-    long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON or LCOV artifact."
+    long_about = "Analyze TypeScript/TSX source against an existing or freshly generated Istanbul JSON or LCOV artifact."
 )]
 struct Cli {
     /// Optional project-local JSON configuration file. If omitted, crap4ts.json
@@ -26,7 +28,8 @@ struct Cli {
     #[arg(long = "config", visible_alias = "config-file", value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Existing coverage artifact. Configuration may provide this value.
+    /// Coverage artifact path. Generated mode removes and recreates this path;
+    /// configuration may provide it.
     #[arg(
         short = 'c',
         long = "coverage",
@@ -38,6 +41,34 @@ struct Cli {
     /// Coverage artifact format. Configuration may provide this value.
     #[arg(long = "coverage-format", value_name = "FORMAT")]
     coverage_format: Option<CoverageFormat>,
+
+    /// Program to run to generate fresh coverage. Repeat --coverage-arg for
+    /// arguments; the command is executed directly without a shell.
+    #[arg(
+        long = "coverage-command",
+        visible_alias = "command",
+        value_name = "PROGRAM",
+        conflicts_with = "no_generate"
+    )]
+    coverage_command: Option<OsString>,
+
+    /// One argument for --coverage-command (repeatable, preserves boundaries).
+    #[arg(
+        long = "coverage-arg",
+        value_name = "ARG",
+        action = ArgAction::Append,
+        allow_hyphen_values = true,
+        conflicts_with = "no_generate"
+    )]
+    coverage_args: Vec<OsString>,
+
+    /// Require a configured coverage command to run before analysis.
+    #[arg(long = "generate", conflicts_with = "no_generate")]
+    generate: bool,
+
+    /// Use an existing artifact even when configuration contains a command.
+    #[arg(long = "no-generate", conflicts_with = "generate")]
+    no_generate: bool,
 
     /// Render a human-readable report or the versioned JSON report.
     #[arg(short = 'f', long = "format", value_name = "FORMAT")]
@@ -162,6 +193,10 @@ fn diagnostic_category(message: &str) -> &'static str {
         "missing_evidence"
     } else if message.starts_with("source parsing failed") {
         "source_parsing"
+    } else if message.starts_with("coverage command") {
+        "coverage_command"
+    } else if message.starts_with("unsafe coverage artifact path") {
+        "unsafe_path"
     } else {
         "configuration"
     }
@@ -183,6 +218,7 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
             "configuration: coverage artifact is required (provide --coverage or config)"
                 .to_string()
         })?;
+    let command = resolved_coverage_command(cli, &values)?;
     let mut requested = if cli.source_paths.is_empty() && cli.source_options.is_empty() {
         values.sources.clone().unwrap_or_default()
     } else {
@@ -218,17 +254,21 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     };
     let policy = config::policy(&values, threshold);
 
-    let coverage_path = if coverage.is_absolute() {
-        coverage
+    let coverage = if let Some(command) = command {
+        generation::generate(&root, &coverage, &command).map_err(CliFailure::from)?
     } else {
-        root.join(coverage)
+        let coverage_path = if coverage.is_absolute() {
+            coverage
+        } else {
+            root.join(coverage)
+        };
+        fs::read_to_string(&coverage_path).map_err(|error| {
+            format!(
+                "configuration: unable to read coverage artifact '{}': {error}",
+                coverage_path.display()
+            )
+        })?
     };
-    let coverage = fs::read_to_string(&coverage_path).map_err(|error| {
-        format!(
-            "configuration: unable to read coverage artifact '{}': {error}",
-            coverage_path.display()
-        )
-    })?;
     let adapter =
         make_coverage_adapter(coverage_format, &coverage, &root).map_err(|error| CliFailure {
             message: error.to_string(),
@@ -254,6 +294,43 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     } else {
         Ok(0)
     }
+}
+
+fn resolved_coverage_command(
+    cli: &Cli,
+    values: &ConfigValues,
+) -> Result<Option<Vec<String>>, CliFailure> {
+    if cli.coverage_command.is_none() && !cli.coverage_args.is_empty() {
+        return Err("configuration: --coverage-arg requires --coverage-command"
+            .to_string()
+            .into());
+    }
+    if cli.no_generate {
+        return Ok(None);
+    }
+    let command = if let Some(program) = &cli.coverage_command {
+        let program = program.to_str().ok_or_else(|| {
+            CliFailure::from("configuration: --coverage-command must be valid UTF-8".to_string())
+        })?;
+        let mut command = Vec::with_capacity(cli.coverage_args.len() + 1);
+        command.push(program.to_string());
+        command.extend(
+            cli.coverage_args
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        );
+        Some(command)
+    } else {
+        values.coverage_command.clone()
+    };
+    if cli.generate && command.is_none() {
+        return Err(
+            "configuration: --generate requires a configured coverage command"
+                .to_string()
+                .into(),
+        );
+    }
+    Ok(command)
 }
 
 fn load_config(cli: &Cli, root: &Path) -> Result<ConfigValues, CliFailure> {

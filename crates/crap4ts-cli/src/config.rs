@@ -17,6 +17,8 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
 };
+
+use crate::generation::CommandSpec;
 pub(crate) const DEFAULT_CONFIG_FILE: &str = "crap4ts.json";
 pub(crate) const DEFAULT_THRESHOLD: u32 = 8;
 
@@ -166,6 +168,8 @@ struct CoverageDetails {
     path: PathBuf,
     #[serde(default, deserialize_with = "reject_null")]
     format: Option<CoverageFormat>,
+    #[serde(default, deserialize_with = "reject_null")]
+    command: Option<CommandSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,11 +179,17 @@ enum CoverageConfig {
     Details(CoverageDetails),
 }
 
+type CoverageParts = (PathBuf, Option<CoverageFormat>, Option<Vec<String>>);
+
 impl CoverageConfig {
-    fn into_parts(self) -> (PathBuf, Option<CoverageFormat>) {
+    fn into_parts(self) -> Result<CoverageParts, String> {
         match self {
-            Self::Path(path) => (path, None),
-            Self::Details(details) => (details.path, details.format),
+            Self::Path(path) => Ok((path, None, None)),
+            Self::Details(details) => Ok((
+                details.path,
+                details.format,
+                details.command.map(CommandSpec::into_argv).transpose()?,
+            )),
         }
     }
 }
@@ -293,8 +303,9 @@ impl ThresholdConfig {
 /// The closed schema for `crap4ts.json`.
 ///
 /// Fields that are not represented here are rejected by serde's
-/// `deny_unknown_fields`, including executable command fields.  Generation
-/// belongs to issue #8 and is intentionally not part of this schema.
+/// `deny_unknown_fields`, including executable command fields.  Coverage
+/// generation is represented by an explicit argv command, never executable
+/// configuration code or an implicitly parsed shell string.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -330,6 +341,22 @@ struct FileConfig {
         deserialize_with = "reject_null"
     )]
     coverage_format: Option<CoverageFormat>,
+    #[serde(
+        default,
+        alias = "coverageCommand",
+        alias = "coverage-command",
+        deserialize_with = "reject_null"
+    )]
+    coverage_command: Option<CommandSpec>,
+    #[serde(default, deserialize_with = "reject_null")]
+    command: Option<CommandSpec>,
+    #[serde(
+        default,
+        alias = "generateCommand",
+        alias = "generate-command",
+        deserialize_with = "reject_null"
+    )]
+    generate_command: Option<CommandSpec>,
     #[serde(default, deserialize_with = "reject_null")]
     format: Option<OutputFormat>,
     #[serde(
@@ -388,6 +415,7 @@ pub(crate) struct ConfigValues {
     pub(crate) sources: Option<Vec<PathBuf>>,
     pub(crate) coverage: Option<PathBuf>,
     pub(crate) coverage_format: Option<CoverageFormat>,
+    pub(crate) coverage_command: Option<Vec<String>>,
     pub(crate) format: Option<OutputFormat>,
     pub(crate) json: Option<bool>,
     pub(crate) threshold: Option<u32>,
@@ -406,11 +434,14 @@ impl FileConfig {
             (None, None, None) => None,
         };
 
-        let (coverage, coverage_format_from_coverage) =
-            self.coverage.map_or((None, None), |coverage| {
-                let (path, format) = coverage.into_parts();
-                (Some(path), format)
-            });
+        let (coverage, coverage_format_from_coverage, coverage_command_from_coverage) =
+            match self.coverage {
+                Some(coverage) => {
+                    let (path, format, command) = coverage.into_parts()?;
+                    (Some(path), format, command)
+                }
+                None => (None, None, None),
+            };
         if coverage.is_some() && self.coverage_file.is_some() {
             return Err("coverage and coverage_file are mutually exclusive".to_string());
         }
@@ -421,6 +452,39 @@ impl FileConfig {
             }
             (Some(format), None) | (None, Some(format)) => Some(format),
             (None, None) => None,
+        };
+
+        let top_level_coverage_command = self
+            .coverage_command
+            .map(CommandSpec::into_argv)
+            .transpose()?;
+        let top_level_command = self.command.map(CommandSpec::into_argv).transpose()?;
+        let top_level_generate_command = self
+            .generate_command
+            .map(CommandSpec::into_argv)
+            .transpose()?;
+        let coverage_command = match (
+            coverage_command_from_coverage,
+            top_level_coverage_command,
+            top_level_command,
+            top_level_generate_command,
+        ) {
+            (Some(_), Some(_), _, _)
+            | (Some(_), _, Some(_), _)
+            | (Some(_), _, _, Some(_))
+            | (_, Some(_), Some(_), _)
+            | (_, Some(_), _, Some(_))
+            | (_, _, Some(_), Some(_)) => {
+                return Err(
+                    "coverage.command, coverage_command, command, and generate_command are mutually exclusive"
+                        .to_string(),
+                )
+            }
+            (Some(command), None, None, None)
+            | (None, Some(command), None, None)
+            | (None, None, Some(command), None)
+            | (None, None, None, Some(command)) => Some(command),
+            (None, None, None, None) => None,
         };
 
         let (format_from_report, json_from_report) = match (self.report, self.reports) {
@@ -492,6 +556,7 @@ impl FileConfig {
             sources,
             coverage,
             coverage_format,
+            coverage_command,
             format,
             json,
             threshold,
@@ -664,5 +729,49 @@ mod tests {
                 .get(&ProjectRelativePath::new("src/a.ts").unwrap()),
             Some(&2)
         );
+    }
+
+    #[test]
+    fn generated_coverage_command_is_decoded_as_an_argv() {
+        let config: FileConfig = serde_json::from_str(
+            r#"{"coverage":{"path":"coverage.json","command":["npm","test","--","--coverage"]}}"#,
+        )
+        .unwrap();
+        let values = config.into_values().unwrap();
+        assert_eq!(
+            values.coverage_command,
+            Some(vec![
+                "npm".to_string(),
+                "test".to_string(),
+                "--".to_string(),
+                "--coverage".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn generated_coverage_command_object_preserves_argument_boundaries() {
+        let config: FileConfig = serde_json::from_str(
+            r#"{"coverage":"coverage.json","coverage_command":{"program":"node","args":["script with spaces.js","--flag=value"]}}"#,
+        )
+        .unwrap();
+        let values = config.into_values().unwrap();
+        assert_eq!(
+            values.coverage_command,
+            Some(vec![
+                "node".to_string(),
+                "script with spaces.js".to_string(),
+                "--flag=value".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn generated_command_string_is_not_implicitly_a_shell_command() {
+        let error = serde_json::from_str::<FileConfig>(
+            r#"{"coverage":{"path":"coverage.json","command":"npm test"}}"#,
+        )
+        .expect_err("command strings must be rejected");
+        assert!(!error.to_string().is_empty());
     }
 }

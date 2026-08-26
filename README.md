@@ -79,6 +79,34 @@ unknown rows without assigning them a score. Threshold keys are exact
 project-relative paths; separators are normalized and basename or glob
 matching is never used.
 
+To generate fresh coverage in the same invocation, add an argv command to the
+coverage object (or use the equivalent top-level `coverage_command` field):
+
+```json
+{
+  "sources": ["src"],
+  "coverage": {
+    "path": "coverage-final.json",
+    "format": "istanbul",
+    "command": ["npm", "test", "--", "--coverage"]
+  },
+  "format": "json"
+}
+```
+
+The first array element is executed as the program and the remaining elements
+are passed as-is; crap4ts does not split a string or invoke a shell. A shell
+can be requested explicitly as a program (for example, `["sh", "-c", ...]`).
+Before generated mode starts, only the explicitly configured artifact can be
+removed. The path must remain below the project root, contain no parent
+traversal, and have no symlink file or ancestor. The command must exit
+successfully and create a readable regular artifact; an older artifact is
+never reused after a failed or incomplete command. Child stdout and stderr are
+forwarded to stderr, so JSON stdout remains a single report document. Use
+`--coverage-command PROGRAM` and repeated `--coverage-arg ARG` for a command
+provided directly on the CLI. `--no-generate` selects the existing-artifact
+path even when a command is configured.
+
 Values are resolved in this order: built-in defaults, project configuration,
 then explicitly supplied CLI options. The default global threshold is `8`,
 and a gate fails only when a measured score is strictly greater than its
