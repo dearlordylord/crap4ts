@@ -15,6 +15,7 @@ const targets = require('../release-targets.json');
 
 const root = path.resolve(__dirname, '..');
 const META_PACKAGE_NAME = '@crap4ts/crap4ts';
+const EXPECTED_GITHUB_LOGIN = 'dearlordylord';
 
 function packageTarballName(name, version) {
   return `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
@@ -104,6 +105,14 @@ function assertGreenCi(head) {
 
 function selectSuccessfulCi(runs, head) {
   return runs.find((run) => run.headSha === head && run.status === 'completed' && run.conclusion === 'success');
+}
+
+function assertExpectedGitHubLogin(login, expected = EXPECTED_GITHUB_LOGIN) {
+  assert.equal(
+    login,
+    expected,
+    `active GitHub account is '${login}'; expected '${expected}'`,
+  );
 }
 
 function ensureTag(tag, head) {
@@ -233,7 +242,7 @@ function main(args = process.argv.slice(2)) {
   const version = require('../package.json').version;
   const tag = `v${version}`;
   const head = assertCleanPushedMaster();
-  command('gh', ['auth', 'status']);
+  assertExpectedGitHubLogin(command('gh', ['api', 'user', '--jq', '.login']));
   command('npm', ['whoami']);
   assertGreenCi(head);
   command(process.execPath, [path.join(root, 'scripts', 'check-versions.js'), '--tag', tag]);
@@ -264,6 +273,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertExpectedGitHubLogin,
   main,
   npmPublicationPlan,
   isMissingReleaseError,

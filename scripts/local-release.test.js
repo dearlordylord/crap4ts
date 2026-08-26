@@ -5,6 +5,7 @@ const test = require('node:test');
 const targets = require('../release-targets.json');
 const { validatedUrl } = require('./download.js');
 const {
+  assertExpectedGitHubLogin,
   npmPublicationPlan,
   packageTarballName,
   isMissingReleaseError,
@@ -13,6 +14,14 @@ const {
   selectReleaseRun,
   selectSuccessfulCi,
 } = require('./local-release.js');
+
+test('local release accepts the active expected GitHub account', () => {
+  assert.doesNotThrow(() => assertExpectedGitHubLogin('dearlordylord'));
+  assert.throws(
+    () => assertExpectedGitHubLogin('Firfi'),
+    /active GitHub account is 'Firfi'; expected 'dearlordylord'/,
+  );
+});
 
 test('local release publishes all native packages before the scoped meta-package', () => {
   const plan = npmPublicationPlan('1.2.3');

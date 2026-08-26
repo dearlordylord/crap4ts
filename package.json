@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=20.19.0 <25"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "check:versions": "node scripts/check-versions.js",
