@@ -19,8 +19,8 @@ pub use application::{
 pub use coverage::{coverage_adapter, make_coverage_adapter, CoverageAdapter, CoverageFormat};
 pub use domain::{
     Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionKind, FunctionUnit,
-    ProjectRelativePath, Report, ReportGroup, ReportRow, SourceFile, SourcePosition, SourceRange,
-    AGGREGATE_REPORT_VERSION, REPORT_VERSION,
+    GroupName, GroupRoot, ProjectRelativePath, Report, ReportGroup, ReportRow, SourceFile,
+    SourcePosition, SourceRange, AGGREGATE_REPORT_VERSION, REPORT_VERSION,
 };
 pub use path::collect_sources;
 pub use report::{render_json, render_text};

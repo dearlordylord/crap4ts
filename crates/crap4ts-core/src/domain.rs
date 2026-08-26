@@ -101,6 +101,113 @@ impl<'de> Deserialize<'de> for ProjectRelativePath {
     }
 }
 
+/// A stable, validated package-group name.
+///
+/// Names are structural identity rather than display-only labels: they are
+/// embedded in qualified function ids and therefore may not contain the
+/// separator used by that identity.  Keeping validation here means callers
+/// cannot construct an aggregate with a name that makes ids ambiguous.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GroupName(String);
+
+impl GroupName {
+    pub fn new(input: &str) -> Result<Self, CoreError> {
+        if input.is_empty()
+            || input.trim() != input
+            || input.contains('\0')
+            || input.contains("::")
+            || input.contains('/')
+            || input.contains('\\')
+            || input.chars().any(char::is_control)
+        {
+            return Err(CoreError::InvalidGroupName(input.to_string()));
+        }
+        Ok(Self(input.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GroupName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for GroupName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(de::Error::custom)
+    }
+}
+
+/// A validated repository-root-relative package-group root.
+///
+/// The root is stored in canonical `/`-separated identity form.  Absolute
+/// paths and parent traversal are rejected before an aggregate can compose a
+/// repository-root row identity.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GroupRoot(String);
+
+impl GroupRoot {
+    pub fn new(input: &str) -> Result<Self, CoreError> {
+        let normalized = input.replace('\\', "/");
+        if normalized.is_empty() || normalized.contains('\0') {
+            return Err(CoreError::InvalidGroupRoot(input.to_string()));
+        }
+        if normalized.starts_with('/')
+            || normalized.as_bytes().get(1) == Some(&b':')
+            || normalized.split('/').any(|component| component == "..")
+        {
+            return Err(CoreError::InvalidGroupRoot(input.to_string()));
+        }
+
+        // A repository-root identity may be written as `.` or a redundant
+        // sequence of current-directory components.  Normalize all of those
+        // spellings to the one identity used by reports.
+        if normalized
+            .split('/')
+            .all(|component| component.is_empty() || component == ".")
+        {
+            return Ok(Self(".".to_string()));
+        }
+        let path = ProjectRelativePath::new(&normalized)
+            .map_err(|_| CoreError::InvalidGroupRoot(input.to_string()))?;
+        Ok(Self(path.as_str().to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GroupRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for GroupRoot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupRoot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(de::Error::custom)
+    }
+}
+
 /// A source file selected within the project root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceFile {
@@ -320,9 +427,9 @@ impl Diagnostic {
 /// separately qualified to repository-root identities.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReportGroup {
-    pub name: String,
+    pub name: GroupName,
     /// `"."` denotes the repository root; other values use `/` separators.
-    pub root: String,
+    pub root: GroupRoot,
     pub threshold: u32,
     pub report_only: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -333,7 +440,10 @@ pub struct ReportGroup {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Report {
     pub version: u32,
-    pub threshold: u32,
+    /// Present only in the v1 single-project schema. Aggregate v2 reports
+    /// carry independent thresholds in [`ReportGroup`] and omit this scalar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u32>,
     pub rows: Vec<ReportRow>,
     pub diagnostics: Vec<Diagnostic>,
     /// Package metadata is omitted from legacy reports and present for the
@@ -373,6 +483,12 @@ pub enum CoreError {
     InvalidCoverageFraction(f64),
     #[error("coverage artifact contains ambiguous file identity '{0}'")]
     AmbiguousCoverageFile(String),
+    #[error("invalid package group name '{0}'")]
+    InvalidGroupName(String),
+    #[error("invalid package group root '{0}'")]
+    InvalidGroupRoot(String),
+    #[error("invalid aggregate identity: {0}")]
+    InvalidAggregateIdentity(String),
 }
 
 impl CoreError {
@@ -383,5 +499,79 @@ impl CoreError {
             Self::MissingEvidence { diagnostics, .. } => diagnostics,
             _ => &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_group_names_are_rejected_at_the_identity_boundary() {
+        for input in [
+            "",
+            " core",
+            "core ",
+            "core::nested",
+            "core/pkg",
+            "core\\pkg",
+        ] {
+            assert!(matches!(
+                GroupName::new(input),
+                Err(CoreError::InvalidGroupName(_))
+            ));
+        }
+        assert_eq!(GroupName::new("core").unwrap().as_str(), "core");
+    }
+
+    #[test]
+    fn malformed_group_roots_are_rejected_and_valid_roots_are_normalized() {
+        for input in ["", "/tmp/core", "../core", "packages/../core", "C:/core"] {
+            assert!(matches!(
+                GroupRoot::new(input),
+                Err(CoreError::InvalidGroupRoot(_))
+            ));
+        }
+        assert_eq!(GroupRoot::new("./").unwrap().as_str(), ".");
+        assert_eq!(
+            GroupRoot::new(r"packages\\core/./").unwrap().as_str(),
+            "packages/core"
+        );
+    }
+
+    #[test]
+    fn v1_and_v2_report_schema_goldens_keep_threshold_scope_explicit() {
+        assert_eq!(REPORT_VERSION, 1);
+        assert_eq!(AGGREGATE_REPORT_VERSION, 2);
+
+        let v1 = Report {
+            version: REPORT_VERSION,
+            threshold: Some(8),
+            rows: Vec::new(),
+            diagnostics: Vec::new(),
+            groups: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&v1).unwrap(),
+            r#"{"version":1,"threshold":8,"rows":[],"diagnostics":[]}"#
+        );
+
+        let v2 = Report {
+            version: AGGREGATE_REPORT_VERSION,
+            threshold: None,
+            rows: Vec::new(),
+            diagnostics: Vec::new(),
+            groups: vec![ReportGroup {
+                name: GroupName::new("core").unwrap(),
+                root: GroupRoot::new("packages/core").unwrap(),
+                threshold: 8,
+                report_only: false,
+                threshold_overrides: BTreeMap::new(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&v2).unwrap(),
+            r#"{"version":2,"rows":[],"diagnostics":[],"groups":[{"name":"core","root":"packages/core","threshold":8,"report_only":false}]}"#
+        );
     }
 }

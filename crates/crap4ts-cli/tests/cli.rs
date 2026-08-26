@@ -904,6 +904,7 @@ fn mixed_package_groups_are_analyzed_with_independent_identity_and_policy() {
     );
     assert_eq!(report["groups"][0]["threshold"], 1);
     assert_eq!(report["groups"][1]["threshold"], 2);
+    assert!(report.get("threshold").is_none());
     let rows = report["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row["group"].is_string()));
@@ -1006,6 +1007,96 @@ fn package_group_declaration_order_does_not_change_canonical_json() {
         .expect("run second declaration order");
     assert_eq!(second_output.status.code(), Some(0));
     assert_eq!(first_output.stdout, second_output.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_group_artifact_identity_supports_deep_missing_parents() {
+    let fixture = MixedFixture::new();
+    fixture.config(json!({
+        "istanbul": {
+            "root": "packages/istanbul",
+            "sources": ["src"],
+            "coverage": {
+                "path": "deep/one/two/generated.json",
+                "format": "istanbul",
+                "command": [
+                    "sh",
+                    "-c",
+                    "mkdir -p deep/one/two && cp coverage-final.json deep/one/two/generated.json"
+                ]
+            },
+            "threshold": 1
+        },
+        "lcov": {
+            "root": "packages/lcov",
+            "sources": ["src"],
+            "coverage": {"path": "lcov.info", "format": "lcov"},
+            "threshold": 2
+        }
+    }));
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run deep generated mixed workspace");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(fixture
+        .root
+        .join("packages/istanbul/deep/one/two/generated.json")
+        .is_file());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("aggregate JSON report");
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn package_group_artifact_aliases_are_rejected_before_generation() {
+    let fixture = MixedFixture::new();
+    fs::write(
+        fixture.root.join("packages/istanbul/src/second.ts"),
+        "function second() { return 2; }\n",
+    )
+    .unwrap();
+    fixture.config(json!({
+        "first": {
+            "root": "packages/istanbul",
+            "sources": ["src/fixture.ts"],
+            "coverage": {
+                "path": "deep/./shared.json",
+                "format": "istanbul",
+                "command": ["sh", "-c", "mkdir -p deep; cp coverage-final.json deep/shared.json"]
+            }
+        },
+        "second": {
+            "root": "packages/istanbul",
+            "sources": ["src/second.ts"],
+            "coverage": {
+                "path": "deep/shared.json",
+                "format": "istanbul",
+                "command": ["sh", "-c", "mkdir -p deep; cp coverage-final.json deep/shared.json"]
+            },
+            "report_only": true
+        }
+    }));
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run aliased artifact groups");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("shared with package group"));
+    assert!(!fixture.root.join("packages/istanbul/deep").exists());
 }
 
 #[test]

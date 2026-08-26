@@ -14,7 +14,8 @@ use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
 use crap4ts_core::{
     aggregate_reports, analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter,
     render_json, render_text, validate_sources, CoverageAdapter, CoverageFormat, Diagnostic,
-    DiagnosticCategory, PackageReport, ProjectRelativePath, SourceFile, ThresholdPolicy,
+    DiagnosticCategory, GroupName, GroupRoot, PackageReport, ProjectRelativePath, SourceFile,
+    ThresholdPolicy,
 };
 
 #[derive(Debug, Parser)]
@@ -319,9 +320,9 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
 /// configuration/source/path failures are observed before any generated
 /// artifact is removed.
 struct ResolvedPackageGroup {
-    name: String,
+    name: GroupName,
     root: PathBuf,
-    root_identity: String,
+    root_identity: GroupRoot,
     sources: Vec<SourceFile>,
     artifact: PathBuf,
     coverage_format: CoverageFormat,
@@ -347,17 +348,21 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
     // This is the complete preflight pass. It performs only validation and
     // reads source files; generation side effects start after this loop.
     for group in groups {
+        let group_name = GroupName::new(&group.name)
+            .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
         let group_root = resolve_group_root(root, group.root.as_deref())
             .map_err(|error| group_failure(&group.name, error, &[]))?;
-        let root_identity = repository_identity(root, &group_root)
+        let root_identity_text = repository_identity(root, &group_root)
             .map_err(|error| group_failure(&group.name, error, &[]))?;
+        let root_identity = GroupRoot::new(&root_identity_text)
+            .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
         let requested = group
             .settings
             .sources
             .clone()
             .unwrap_or_default()
             .into_iter()
-            .map(|path| group_relative_path(path, &root_identity))
+            .map(|path| group_relative_path(path, root_identity.as_str()))
             .collect::<Vec<_>>();
         let sources = collect_sources(&group_root, &requested)
             .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
@@ -402,7 +407,7 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             .settings
             .coverage
             .clone()
-            .map(|path| group_relative_path(path, &root_identity))
+            .map(|path| group_relative_path(path, root_identity.as_str()))
             .ok_or_else(|| {
                 group_failure(
                     &group.name,
@@ -432,7 +437,8 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
                 .map_err(|error| group_failure(&group.name, error, &[]))?;
         }
         let threshold = group.settings.threshold.unwrap_or(DEFAULT_THRESHOLD);
-        let policy = group_policy(&group.settings, threshold, &root_identity);
+        let policy = group_policy(&group.settings, threshold, root_identity.as_str())
+            .map_err(|error| group_failure(&group.name, error, &[]))?;
         let adapter = if command.is_none() {
             let coverage = read_group_artifact(&group_root, &artifact)
                 .map_err(|error| group_failure(&group.name, error, &[]))?;
@@ -453,7 +459,7 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             None
         };
         resolved.push(ResolvedPackageGroup {
-            name: group.name.clone(),
+            name: group_name,
             root: group_root,
             root_identity,
             sources,
@@ -473,13 +479,13 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             adapter
         } else {
             let coverage = acquire_group_coverage(&group)
-                .map_err(|error| group_failure(&group.name, error, &[]))?;
+                .map_err(|error| group_failure(group.name.as_str(), error, &[]))?;
             make_coverage_adapter(group.coverage_format, &coverage, &group.root).map_err(
                 |error| {
                     group_failure(
-                        &group.name,
+                        group.name.as_str(),
                         error.to_string(),
-                        &qualified_diagnostics(&group.name, error.diagnostics()),
+                        &qualified_diagnostics(group.name.as_str(), error.diagnostics()),
                     )
                 },
             )?
@@ -492,9 +498,9 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
         )
         .map_err(|error| {
             group_failure(
-                &group.name,
+                group.name.as_str(),
                 error.to_string(),
-                &qualified_diagnostics(&group.name, error.diagnostics()),
+                &qualified_diagnostics(group.name.as_str(), error.diagnostics()),
             )
         })?;
         breached |= group.policy.gate_breached(&report);
@@ -509,7 +515,10 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
 
     // Rendering occurs exactly once and only after every package has reached
     // a completed in-memory report.
-    let report = aggregate_reports(packages);
+    let report = aggregate_reports(packages).map_err(|error| CliFailure {
+        message: error.to_string(),
+        diagnostics: error.diagnostics().to_vec(),
+    })?;
     let format = resolved_format(cli, values);
     if format == OutputFormat::Json {
         let document = render_json(&report)
@@ -646,46 +655,76 @@ fn group_relative_path(path: PathBuf, root_identity: &str) -> PathBuf {
     }
 }
 
-fn group_policy(values: &ConfigValues, global: u32, root_identity: &str) -> ThresholdPolicy {
-    values.threshold_overrides.iter().fold(
+fn group_policy(
+    values: &ConfigValues,
+    global: u32,
+    root_identity: &str,
+) -> Result<ThresholdPolicy, String> {
+    values.threshold_overrides.iter().try_fold(
         ThresholdPolicy::new(global),
         |policy, (path, threshold)| {
             let path = group_relative_path(PathBuf::from(path.as_str()), root_identity);
-            let Ok(path) = ProjectRelativePath::new(path.to_string_lossy().as_ref()) else {
-                return policy;
-            };
-            policy.with_path_override(path, *threshold)
+            let path =
+                ProjectRelativePath::new(path.to_string_lossy().as_ref()).map_err(|error| {
+                    format!(
+                        "configuration: invalid threshold override path '{}': {error}",
+                        path.display()
+                    )
+                })?;
+            Ok(policy.with_path_override(path, *threshold))
         },
     )
 }
 
 fn artifact_identity(path: &Path) -> Result<PathBuf, String> {
-    if path.exists() {
-        return fs::canonicalize(path).map_err(|error| {
-            format!(
-                "configuration: unable to resolve coverage artifact '{}': {error}",
-                path.display()
-            )
-        });
+    // Generated targets may have several missing parent directories. Walk to
+    // the nearest existing ancestor, canonicalize only that safe portion,
+    // then append the validated missing components in their original order.
+    // `validate_artifact_path` has already rejected traversal and symlinked
+    // ancestors, so this preserves aliases while still catching duplicate
+    // targets that use different lexical spellings.
+    let mut current = path.to_path_buf();
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = current.file_name().ok_or_else(|| {
+                    format!(
+                        "configuration: coverage artifact '{}' has no file name",
+                        path.display()
+                    )
+                })?;
+                missing.push(component.to_os_string());
+                current = current
+                    .parent()
+                    .ok_or_else(|| {
+                        format!(
+                            "configuration: coverage artifact '{}' has no existing ancestor",
+                            path.display()
+                        )
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "configuration: unable to inspect coverage artifact '{}': {error}",
+                    current.display()
+                ));
+            }
+        }
     }
-    let parent = path.parent().ok_or_else(|| {
+
+    let mut identity = fs::canonicalize(&current).map_err(|error| {
         format!(
-            "configuration: coverage artifact '{}' has no parent",
-            path.display()
+            "configuration: unable to resolve coverage artifact ancestor '{}': {error}",
+            current.display()
         )
     })?;
-    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
-        format!(
-            "configuration: unable to resolve coverage artifact parent '{}': {error}",
-            parent.display()
-        )
-    })?;
-    Ok(canonical_parent.join(path.file_name().ok_or_else(|| {
-        format!(
-            "configuration: coverage artifact '{}' has no file name",
-            path.display()
-        )
-    })?))
+    for component in missing.iter().rev() {
+        identity.push(component);
+    }
+    Ok(identity)
 }
 
 fn read_group_artifact(root: &Path, configured: &Path) -> Result<String, String> {

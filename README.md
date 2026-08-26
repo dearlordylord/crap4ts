@@ -155,6 +155,10 @@ Diagnostics carry the originating `group`, while `groups` records each
 package root, threshold, missing-evidence mode, and exact path overrides. Rows are sorted globally by
 CRAP score (worst first), then group, path, and source position. Group
 declarations are sorted by name for canonical output.
+Version 2 omits the legacy top-level `threshold` scalar because no single
+threshold applies to all groups; consumers must read each group's policy from
+`groups`. Version 1 single-project reports retain that scalar and their
+existing JSON shape.
 
 The existing single-project analysis flags (`--coverage`, source paths,
 `--coverage-format`, generation flags, `--threshold`, and missing-evidence

@@ -5,8 +5,8 @@ use std::{cmp::Ordering, collections::BTreeMap, path::Path};
 use crate::{
     coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
     domain::{
-        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportGroup,
-        ReportRow, SourceFile,
+        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, GroupName, GroupRoot,
+        Report, ReportGroup, ReportRow, SourceFile,
     },
     source,
 };
@@ -242,7 +242,7 @@ pub fn analyze_with_adapter_and_policy(
     });
     Ok(Report {
         version: crate::domain::REPORT_VERSION,
-        threshold: policy.global(),
+        threshold: Some(policy.global()),
         rows,
         diagnostics,
         groups: Vec::new(),
@@ -257,9 +257,9 @@ pub fn analyze_with_adapter_and_policy(
 /// failure can never expose an earlier package's report.
 #[derive(Clone, Debug)]
 pub struct PackageReport {
-    pub name: String,
+    pub name: GroupName,
     /// Repository-root-relative package root ("." for the root itself).
-    pub root: String,
+    pub root: GroupRoot,
     pub policy: ThresholdPolicy,
     pub report_only: bool,
     pub report: Report,
@@ -269,12 +269,21 @@ pub struct PackageReport {
 /// aggregate document. Rows retain their local source ranges and coverage,
 /// while path and id identities are qualified with the package root/name so
 /// same-named functions in different packages cannot collide.
-pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Report {
+pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, CoreError> {
     packages.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.root.cmp(&right.root))
     });
+
+    for pair in packages.windows(2) {
+        if pair[0].name == pair[1].name {
+            return Err(CoreError::InvalidAggregateIdentity(format!(
+                "duplicate package group name '{}'",
+                pair[0].name
+            )));
+        }
+    }
 
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
@@ -287,10 +296,10 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Report {
             report_only,
             mut report,
         } = package;
-        let local_root = if root == "." {
+        let local_root = if root.as_str() == "." {
             String::new()
         } else {
-            root.clone()
+            root.as_str().to_string()
         };
         for mut row in report.rows.drain(..) {
             let local_path = row.path.clone();
@@ -299,26 +308,30 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Report {
             } else {
                 format!("{local_root}/{}", local_path.as_str())
             };
-            // A report row's path is validated at source selection time. The
-            // composed identity is therefore expected to be valid; retaining
-            // the local value on the impossible error keeps this pure
-            // assembly function infallible without introducing a sentinel.
-            if let Ok(path) = crate::domain::ProjectRelativePath::new(&qualified_path) {
-                row.path = path;
-            }
+            // Both the group root and local row path are validated values,
+            // but the public aggregate boundary still validates their
+            // composition before changing either identity. Never leave a
+            // local path beside a repository-qualified id on failure.
+            row.path =
+                crate::domain::ProjectRelativePath::new(&qualified_path).map_err(|error| {
+                    CoreError::InvalidAggregateIdentity(format!(
+                        "group '{}' composed invalid row path '{}': {error}",
+                        name, qualified_path
+                    ))
+                })?;
             let suffix = row
                 .id
                 .strip_prefix(local_path.as_str())
                 .unwrap_or(row.id.as_str());
             row.id = format!("{name}::{qualified_path}{suffix}");
-            row.group = Some(name.clone());
+            row.group = Some(name.to_string());
             rows.push(row);
         }
         diagnostics.extend(
             report
                 .diagnostics
                 .drain(..)
-                .map(|diagnostic| diagnostic.with_group(name.clone())),
+                .map(|diagnostic| diagnostic.with_group(name.to_string())),
         );
         groups.push(ReportGroup {
             name,
@@ -331,22 +344,13 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Report {
 
     rows.sort_by(compare_rows);
     diagnostics.sort_by(compare_diagnostics);
-    // threshold is retained for schema compatibility. With independent
-    // package policies it is a summary only; consumers should use groups.
-    // The minimum is deterministic and conservative for callers that still
-    // inspect the legacy scalar.
-    let threshold = groups
-        .iter()
-        .map(|group| group.threshold)
-        .min()
-        .unwrap_or(0);
-    Report {
+    Ok(Report {
         version: crate::domain::AGGREGATE_REPORT_VERSION,
-        threshold,
+        threshold: None,
         rows,
         diagnostics,
         groups,
-    }
+    })
 }
 
 fn compare_diagnostics(left: &Diagnostic, right: &Diagnostic) -> Ordering {
@@ -472,7 +476,7 @@ mod tests {
     fn aggregate_reports_qualify_repository_identity_and_sort_groups() {
         let first = crate::domain::Report {
             version: crate::domain::REPORT_VERSION,
-            threshold: 8,
+            threshold: Some(8),
             rows: vec![row("src/file.ts", Some(2.0))],
             diagnostics: vec![Diagnostic::new(
                 DiagnosticCategory::CoverageAttribution,
@@ -482,28 +486,30 @@ mod tests {
         };
         let second = crate::domain::Report {
             version: crate::domain::REPORT_VERSION,
-            threshold: 8,
+            threshold: Some(8),
             rows: vec![row("src/file.ts", Some(2.0))],
             diagnostics: Vec::new(),
             groups: Vec::new(),
         };
         let report = aggregate_reports(vec![
             PackageReport {
-                name: "z".to_string(),
-                root: "packages/z".to_string(),
+                name: GroupName::new("z").unwrap(),
+                root: GroupRoot::new("packages/z").unwrap(),
                 policy: ThresholdPolicy::new(8),
                 report_only: false,
                 report: first,
             },
             PackageReport {
-                name: "a".to_string(),
-                root: "packages/a".to_string(),
+                name: GroupName::new("a").unwrap(),
+                root: GroupRoot::new("packages/a").unwrap(),
                 policy: ThresholdPolicy::new(8),
                 report_only: false,
                 report: second,
             },
-        ]);
+        ])
+        .unwrap();
         assert_eq!(report.version, crate::domain::AGGREGATE_REPORT_VERSION);
+        assert_eq!(report.threshold, None);
         assert_eq!(
             report
                 .groups
@@ -516,5 +522,27 @@ mod tests {
         assert_eq!(report.rows[0].path.as_str(), "packages/a/src/file.ts");
         assert_eq!(report.rows[0].id, "a::packages/a/src/file.ts::f");
         assert_eq!(report.diagnostics[0].group.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn aggregate_reports_rejects_duplicate_validated_group_names() {
+        let report = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: Some(8),
+            rows: Vec::new(),
+            diagnostics: Vec::new(),
+            groups: Vec::new(),
+        };
+        let package = |root: &str| PackageReport {
+            name: GroupName::new("core").unwrap(),
+            root: GroupRoot::new(root).unwrap(),
+            policy: ThresholdPolicy::new(8),
+            report_only: false,
+            report: report.clone(),
+        };
+        assert!(matches!(
+            aggregate_reports(vec![package("packages/core-a"), package("packages/core-b")]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
     }
 }
