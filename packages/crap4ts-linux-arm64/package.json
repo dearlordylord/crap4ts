@@ -1,0 +1,16 @@
+{
+  "name": "@crap4ts/linux-arm64",
+  "version": "0.1.0",
+  "description": "Linux arm64 binary for crap4ts",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "crap4tsBinary": "bin/crap4ts"
+}

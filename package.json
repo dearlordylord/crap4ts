@@ -1,0 +1,23 @@
+{
+  "name": "crap4ts-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development workspace for the crap4ts Rust CLI and npm distribution",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20.19.0 <25"
+  },
+  "scripts": {
+    "check:versions": "node scripts/check-versions.js",
+    "lint:npm": "node --check packages/crap4ts/bin/crap4ts.js && node --check packages/crap4ts/test/npm.test.js && node --check scripts/check-versions.js && node --check scripts/stage-platform.js && node --check scripts/pack-platform.js && node --check scripts/npm-smoke.js",
+    "lint": "npm run lint:npm",
+    "pack:npm": "node scripts/pack-platform.js",
+    "stage:npm": "node scripts/stage-platform.js",
+    "smoke:npm": "node scripts/npm-smoke.js",
+    "test:npm": "npm run test --workspace packages/crap4ts",
+    "test": "npm run check:versions && npm run test:npm"
+  }
+}

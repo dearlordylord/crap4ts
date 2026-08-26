@@ -1,0 +1,16 @@
+{
+  "name": "@crap4ts/win32-x64",
+  "version": "0.1.0",
+  "description": "Windows x64 binary for crap4ts",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "crap4tsBinary": "bin/crap4ts.exe"
+}

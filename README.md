@@ -72,6 +72,43 @@ Each selected directory is also a traversal boundary. Paths are normalized to
 the same project-relative identity. Coverage entries must use that identity
 (or an absolute path inside `--project-root`); basename and unrelated-path
 guesses are rejected.
+### npm distribution
+
+The npm distribution is a thin launcher around the same standalone binary:
+
+```sh
+npm install --save-dev crap4ts
+npx crap4ts --help
+```
+
+The meta-package selects an optional native package for Linux x64/arm64,
+macOS x64/arm64, or Windows x64. It forwards command-line arguments, standard
+streams, signals, and the native process status. It has no postinstall network
+download and contains no analysis implementation. A missing optional package
+or unsupported platform is reported with an actionable error; unsupported
+platforms can use a Cargo-built binary.
+
+The supported Node.js range is `>=20.19.0 <25`, covering the maintained Node
+20, 22, and 24 LTS lines. npm and Rust package versions are checked together by
+`npm run check:versions`. The committed `package-lock.json` pins the npm
+workspace's package relationships.
+
+Maintainers package a prebuilt binary rather than downloading one during npm
+installation. For example, a host release artifact can be staged and checked
+with:
+
+```sh
+cargo build --release -p crap4ts
+node scripts/stage-platform.js --target linux-arm64 --binary target/release/crap4ts
+npm run pack:npm -- --target linux-arm64 --binary target/release/crap4ts
+```
+
+The staging command validates the target's declared `bin` path, and the pack
+command fails unless the resulting tarball contains an executable payload. The
+clean host archive smoke is run by `npm test`; it builds release mode, packs
+the meta and host package, installs them in a temporary consumer, and invokes
+help plus fixture analysis. Issue #11 owns the cross-target release matrix and
+checksum/publishing automation.
 
 ## License
 
