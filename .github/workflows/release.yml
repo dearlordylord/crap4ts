@@ -45,7 +45,9 @@ jobs:
       - id: targets
         name: Export release targets
         shell: bash
-        run: echo "matrix=$(node -e 'const targets=require(\"./release-targets.json\"); console.log(JSON.stringify(Object.entries(targets).map(([target, descriptor]) => ({target, ...descriptor}))));')" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix=$(node -e 'const targets=require("./release-targets.json"); process.stdout.write(JSON.stringify(Object.entries(targets).map(([target, descriptor]) => ({target, ...descriptor}))));')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}

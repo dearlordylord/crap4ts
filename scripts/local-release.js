@@ -122,9 +122,10 @@ function ensureTag(tag, head) {
     const remoteRef = `refs/remotes/origin/release-tags/${tag}`;
     command('git', ['fetch', '--force', 'origin', `refs/tags/${tag}:${remoteRef}`]);
     assert.equal(command('git', ['rev-list', '-n', '1', remoteRef]), head, `remote ${tag} already points at another commit`);
-    if (local.status === 0) {
-      assert.equal(command('git', ['rev-list', '-n', '1', tag]), head, `local ${tag} already points at another commit`);
+    if (local.status !== 0 || command('git', ['rev-list', '-n', '1', tag]) !== head) {
+      command('git', ['fetch', '--force', 'origin', `refs/tags/${tag}:refs/tags/${tag}`]);
     }
+    assert.equal(command('git', ['rev-list', '-n', '1', tag]), head, `local ${tag} does not match the verified remote tag`);
     return;
   }
   if (remote.status !== 2) throw new Error(`could not inspect remote tag ${tag}: ${remote.stderr.trim()}`);
