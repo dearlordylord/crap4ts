@@ -24,7 +24,8 @@ function parseArgs(args) {
     if (argument === '--binary' || argument === '--marker' || argument === '--release-dir') {
       const value = args[index + 1];
       if (!value || value.startsWith('-')) throw new Error(`${argument} requires a value`);
-      options[argument.slice(2)] = value;
+      const key = argument.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      options[key] = value;
       index += 1;
     } else if (argument === '--help' || argument === '-h') {
       process.stdout.write('Usage: node scripts/npm-smoke.js --release-dir DIR --binary PATH [--marker PATH]\n');
