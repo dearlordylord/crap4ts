@@ -6,6 +6,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { pack, verifyNativePack } = require('../../../scripts/pack-platform.js');
+const { stage } = require('../../../scripts/stage-platform.js');
 
 const repositoryRoot = path.resolve(__dirname, '../../..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -122,4 +124,29 @@ test('Rust and npm package versions are checked together', () => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /versions aligned at 0\.1\.0/);
+});
+
+test('Windows package accepts a mode-0644 executable payload', () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'crap4ts-win-pack-'));
+  const destination = path.join(
+    repositoryRoot,
+    'packages',
+    'crap4ts-win32-x64',
+    'bin',
+    'crap4ts.exe',
+  );
+  try {
+    const input = path.join(temporaryRoot, 'crap4ts.exe');
+    fs.writeFileSync(input, 'windows executable fixture');
+    fs.chmodSync(input, 0o644);
+    stage('win32-x64', input);
+    const packed = pack('crap4ts-win32-x64', temporaryRoot);
+    assert.doesNotThrow(() => verifyNativePack(packed, 'win32-x64'));
+    const payload = packed.metadata.files.find((entry) => entry.path === 'bin/crap4ts.exe');
+    assert.ok(payload);
+    assert.equal(payload.mode & 0o111, 0);
+  } finally {
+    fs.rmSync(destination, { force: true });
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });

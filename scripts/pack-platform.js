@@ -78,13 +78,13 @@ function pack(packageDirectory, outputDir) {
   return { archive, metadata: packed, packageJson: packageMetadata(packageDirectory) };
 }
 
-function verifyNativePack(result) {
+function verifyNativePack(result, target) {
   const binaryPath = result.packageJson.crap4tsBinary;
   const file = result.metadata.files.find((entry) => entry.path === binaryPath);
   if (!file) {
     throw new Error(`${result.packageJson.name} tarball does not contain ${binaryPath}`);
   }
-  if ((file.mode & 0o111) === 0) {
+  if (target !== 'win32-x64' && (file.mode & 0o111) === 0) {
     throw new Error(`${result.packageJson.name} tarball payload ${binaryPath} is not executable`);
   }
 }
@@ -102,7 +102,7 @@ function main() {
   }
   const packages = selectedTargets.map((target) => {
     const result = pack(targets[target].packageDirectory, outputDir);
-    verifyNativePack(result);
+    verifyNativePack(result, target);
     return result;
   });
   const meta = pack('crap4ts', outputDir);
