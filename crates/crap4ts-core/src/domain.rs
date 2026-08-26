@@ -122,10 +122,6 @@ pub struct SourceRange {
 }
 
 impl SourceRange {
-    pub(crate) fn contains(self, position: SourcePosition) -> bool {
-        self.start.offset <= position.offset && position.offset < self.end.offset
-    }
-
     pub(crate) fn size(self) -> usize {
         self.end.offset.saturating_sub(self.start.offset)
     }
@@ -266,6 +262,19 @@ pub enum DiagnosticCategory {
     MissingEvidence,
     SourceParsing,
     ThresholdBreach,
+}
+
+impl DiagnosticCategory {
+    pub(crate) const fn as_label(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::CoverageAttribution => "coverage_attribution",
+            Self::CoverageParsing => "coverage_parsing",
+            Self::MissingEvidence => "missing_evidence",
+            Self::SourceParsing => "source_parsing",
+            Self::ThresholdBreach => "threshold_breach",
+        }
+    }
 }
 
 /// Deterministic user-facing diagnostic.

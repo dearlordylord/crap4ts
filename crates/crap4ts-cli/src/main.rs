@@ -84,9 +84,40 @@ fn run() -> i32 {
     match execute(&cli) {
         Ok(status) => status,
         Err(message) => {
-            eprintln!("error: {message}");
+            render_failure(&message, cli.json || cli.format == OutputFormat::Json);
             1
         }
+    }
+}
+
+fn render_failure(message: &str, json_output: bool) {
+    let category = diagnostic_category(message);
+    if json_output {
+        let document = serde_json::json!({
+            "diagnostics": [{"category": category, "message": message}]
+        });
+        // This is intentionally written to stderr: JSON stdout remains
+        // reserved for completed versioned reports.
+        eprintln!("{}", document);
+    } else {
+        eprintln!("error: {message}");
+        eprintln!("diagnostic [{category}]: {message}");
+    }
+}
+
+fn diagnostic_category(message: &str) -> &'static str {
+    if message.starts_with("coverage attribution failed")
+        || message.starts_with("coverage artifact contains ambiguous")
+    {
+        "coverage_attribution"
+    } else if message.starts_with("coverage parsing failed") {
+        "coverage_parsing"
+    } else if message.starts_with("missing coverage evidence") {
+        "missing_evidence"
+    } else if message.starts_with("source parsing failed") {
+        "source_parsing"
+    } else {
+        "configuration"
     }
 }
 
