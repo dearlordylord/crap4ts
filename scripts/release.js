@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { targets, binaryForDirectory } = require('./stage-platform.js');
-const { packAll } = require('./pack-platform.js');
+const { packTargets } = require('./pack-platform.js');
 const {
   main: checkVersions,
   rustWorkspaceVersion,
@@ -272,6 +272,10 @@ function verifyNpmPackages(directory, version) {
     assert.deepEqual(item.metadata.os, [descriptor.os], `${descriptor.packageName} os metadata mismatch`);
     assert.deepEqual(item.metadata.cpu, [descriptor.cpu], `${descriptor.packageName} cpu metadata mismatch`);
     assert.equal(item.metadata.crap4tsBinary, descriptor.binaryPath, `${descriptor.packageName} binary mapping mismatch`);
+    const standalone = path.join(directory, versionedArchiveName(version, target));
+    const standaloneBytes = execFileSync('tar', ['-xOf', standalone, `crap4ts-${target}/${descriptor.binaryName}`]);
+    const npmBytes = execFileSync('tar', ['-xOf', item.archive, `package/${descriptor.binaryPath}`]);
+    assert.equal(hashFileBuffer(npmBytes), hashFileBuffer(standaloneBytes), `${target} standalone and npm binary payload differ`);
   }
   const meta = byName.get('crap4ts');
   assert.ok(meta, 'missing crap4ts meta-package archive');
@@ -285,6 +289,8 @@ function verifyNpmPackages(directory, version) {
     assert.equal(dependency, version, 'meta-package optional dependency version mismatch');
   }
 }
+
+function hashFileBuffer(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
 function verifyRelease(options) {
   const version = rustWorkspaceVersion();
@@ -313,7 +319,7 @@ function verifyRelease(options) {
 
   const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'npm', '.smoke.ok']);
   for (const entry of fs.readdirSync(releaseDirectory)) {
-    if (!allowedRoot.has(entry) && !entry.startsWith('.standalone-')) throw new Error(`unexpected release file ${entry}`);
+    if (!allowedRoot.has(entry)) throw new Error(`unexpected release file ${entry}`);
   }
   const allowedNpm = new Set([...fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')), 'SHA256SUMS']);
   for (const entry of fs.readdirSync(path.join(releaseDirectory, 'npm'))) {
@@ -354,11 +360,14 @@ function assembleRelease(options) {
         path.join(releaseDirectory, versionedArchiveName(version, target)),
       );
     }
-    packAll(binaryDirectory, packageOutput);
+    const sources = Object.fromEntries(targetNames.map((target) => [target, binaryForTarget(binaryDirectory, target)]));
+    packTargets(sources, packageOutput, targetNames);
     const files = distributableFiles(releaseDirectory, version);
     verifyNpmPackages(releaseDirectory, version);
     writeManifest(files, path.join(releaseDirectory, 'SHA256SUMS'));
     writeManifest(fs.readdirSync(packageOutput).filter((name) => name.endsWith('.tgz')).map((name) => path.join(packageOutput, name)), path.join(packageOutput, 'SHA256SUMS'));
+    // Remove staging before the strict recursive release check.
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
     // Verify before returning so assembly cannot hand a caller a partial set.
     verifyRelease({ releaseDir: releaseDirectory, requireSmoke: false });
     process.stdout.write(`assembled ${version} release in ${releaseDirectory}\n`);

@@ -62,7 +62,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Install Rust with fmt and clippy
-        uses: dtolnay/rust-toolchain@e97e3d8cc4a3f6f2f7f0c8d9d6a8c3e6f8d7a2b1 # 1.94.0
+        uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
         with:
           targets: ${{ matrix.rustTarget }}
           components: rustfmt, clippy
@@ -83,6 +83,20 @@ jobs:
           "$binary" --help >/dev/null
           node scripts/check-versions.js --binary "$binary"
           cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
+      - name: Native Windows generated-mode smoke (direct executable)
+        if: matrix.os == 'win32'
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path "target\${{ matrix.rustTarget }}\release\${{ matrix.binaryName }}").Path
+          $fixture = Join-Path $env:RUNNER_TEMP 'crap4ts-generated-smoke'
+          New-Item -ItemType Directory -Force $fixture | Out-Null
+          Set-Content (Join-Path $fixture 'coverage-template.json') '{"version":3,"file":"x.js","fnMap":{},"fn":{"f":1},"statementMap":{},"s":{"s":1},"branchMap":{},"b":{}}'
+          $config = '{"coverage_command":{"program":"node.exe","args":["-e","const fs=require(''fs''); const [marker,src,dst]=process.argv.slice(1); if(marker!==''hostile argument ; *'') process.exit(7); fs.copyFileSync(src,dst);","hostile argument ; *","coverage-template.json","coverage-final.json"]},"coverage_artifact":"coverage-final.json"}'
+          Set-Content (Join-Path $fixture '.crap4ts.json') $config
+          Push-Location $fixture
+          & $binary --coverage generated --format json | Out-Null
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { throw "native Windows generated-mode smoke failed" }
       - name: Upload target binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -123,11 +137,12 @@ jobs:
         shell: bash
         run: |
           git fetch origin master --no-tags || true
+          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           git fetch origin main --no-tags || true
           base_ref=origin/master
           git rev-parse --verify --quiet "$base_ref" >/dev/null || base_ref=origin/main
           test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
-          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse "$base_ref")"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse "$base_ref^{commit}")"
           npm run check:versions -- --tag "$RELEASE_TAG"
       - name: Assemble standalone archives, npm packages, and checksums
         run: node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
@@ -151,6 +166,7 @@ jobs:
     if: github.event_name == 'push' || inputs.publish == true
     needs: assemble
     runs-on: ubuntu-latest
+    environment: release-production
     permissions:
       contents: write
       id-token: write
@@ -163,8 +179,14 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '22.x'
+          node-version: '22.14.x'
           registry-url: https://registry.npmjs.org
+      - name: Install trusted publishing npm CLI
+        shell: bash
+        run: |
+          npm install --global npm@11.5.1
+          node -e 'const [major,minor]=process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 14)) throw new Error("Node >=22.14 is required")'
+          test "$(npm --version)" = "11.5.1"
       - name: Download verified release directory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -176,7 +198,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        run: gh release create "$RELEASE_TAG" --draft --verify-tag --title "crap4ts $RELEASE_TAG" --notes "Automated release; assets are gated below." || gh release view "$RELEASE_TAG"
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft,tagName >/tmp/existing-release.json 2>/dev/null; then
+            test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).isDraft")" = "true"
+            test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).tagName")" = "$RELEASE_TAG"
+            test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "crap4ts $RELEASE_TAG" --notes "Automated release; assets are gated below."
+          fi
       - name: Publish native npm packages before meta-package
         shell: bash
         run: |
@@ -195,7 +224,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        run: gh release upload "$RELEASE_TAG" dist/release/*.tar.gz dist/release/SHA256SUMS
+        run: gh release upload "$RELEASE_TAG" dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/npm/SHA256SUMS
       - name: Finalize release after all gates
         env:
           GH_TOKEN: ${{ github.token }}

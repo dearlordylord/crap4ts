@@ -253,10 +253,10 @@ unambiguous and include the semantic version and target:
 
 ```text
 crap4ts-1.0.0-linux-x64.tar.gz
-crap4ts-0.1.0-linux-arm64.tar.gz
-crap4ts-0.1.0-darwin-x64.tar.gz
-crap4ts-0.1.0-darwin-arm64.tar.gz
-crap4ts-0.1.0-win32-x64.tar.gz
+crap4ts-1.0.0-linux-arm64.tar.gz
+crap4ts-1.0.0-darwin-x64.tar.gz
+crap4ts-1.0.0-darwin-arm64.tar.gz
+crap4ts-1.0.0-win32-x64.tar.gz
 ```
 
 Each archive contains the native executable, `LICENSE`, and this README.

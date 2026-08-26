@@ -166,13 +166,13 @@ function verifyMetaPack(result) {
   return launcher;
 }
 
-function packAll(binaryDirectory, outputDir) {
-  const selectedTargets = Object.keys(targets);
+function packTargets(sources, outputDir, selectedTargets = Object.keys(targets)) {
   fs.mkdirSync(outputDir, { recursive: true });
   const staged = [];
   try {
     const packages = selectedTargets.map((target) => {
-      const source = binaryForDirectory(path.resolve(binaryDirectory), target);
+      const source = sources[target];
+      if (!source) throw new Error(`missing source binary for ${target}`);
       stage(target, source);
       staged.push(target);
       const result = pack(targets[target].packageDirectory, outputDir);
@@ -192,34 +192,14 @@ function main() {
   const outputDir = path.resolve(options.outputDir);
   fs.mkdirSync(outputDir, { recursive: true });
   const selectedTargets = options.target ? [options.target] : Object.keys(targets);
-  if (selectedTargets.length === Object.keys(targets).length && options.binaryDir) {
-    const result = packAll(path.resolve(options.binaryDir), outputDir);
-    process.stdout.write(`${[...result.packages, result.meta].map((entry) => entry.archive).join('\n')}\n`);
-    return;
-  }
-  const staged = [];
-  try {
-    for (const target of selectedTargets) {
-      if (!targets[target]) throw new Error(`unsupported target ${JSON.stringify(target)}`);
-      const source = options.binaryDir
-        ? binaryForDirectory(path.resolve(options.binaryDir), target)
-        : options.binary;
-      stage(target, source);
-      staged.push(target);
-    }
-    const packages = selectedTargets.map((target) => {
-      const result = pack(targets[target].packageDirectory, outputDir);
-      verifyNativePack(result, target);
-      return result;
-    });
-    const meta = pack('crap4ts', outputDir);
-    verifyMetaPack(meta);
-    process.stdout.write(
-      `${[...packages, meta].map((result) => result.archive).join('\n')}\n`,
-    );
-  } finally {
-    for (const target of staged) removeStaged(target);
-  }
+  const sources = Object.fromEntries(selectedTargets.map((target) => {
+    if (!targets[target]) throw new Error(`unsupported target ${JSON.stringify(target)}`);
+    return [target, options.binaryDir
+      ? binaryForDirectory(path.resolve(options.binaryDir), target)
+      : options.binary];
+  }));
+  const result = packTargets(sources, outputDir, selectedTargets);
+  process.stdout.write(`${[...result.packages, result.meta].map((entry) => entry.archive).join('\n')}\n`);
 }
 
 if (require.main === module) {
@@ -234,7 +214,7 @@ if (require.main === module) {
 module.exports = {
   main,
   pack,
-  packAll,
+  packTargets,
   parseArgs,
   removeStaged,
   verifyMetaPack,
