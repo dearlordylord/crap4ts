@@ -19,6 +19,13 @@ const {
 
 const root = path.resolve(__dirname, '..');
 const targetNames = Object.keys(targets);
+const REQUIRED_TARGETS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'];
+assert.deepEqual([...targetNames].sort(), REQUIRED_TARGETS, 'release target map must contain exactly the five supported targets');
+for (const target of REQUIRED_TARGETS) {
+  const descriptor = targets[target];
+  assert.equal(descriptor.archiveExtension, 'tar.gz', `${target} archive extension must be tar.gz`);
+  if (target.startsWith('linux-')) assert.equal(descriptor.libc, 'glibc', `${target} must declare glibc libc`);
+}
 const packageNames = [...targetNames.map((target) => targets[target].packageName), 'crap4ts'];
 
 function usage() {
@@ -271,10 +278,12 @@ function verifyNpmPackages(directory, version) {
     assert.ok(item.entries.includes(`package/${descriptor.binaryPath}`), `${descriptor.packageName} archive is missing ${descriptor.binaryPath}`);
     assert.deepEqual(item.metadata.os, [descriptor.os], `${descriptor.packageName} os metadata mismatch`);
     assert.deepEqual(item.metadata.cpu, [descriptor.cpu], `${descriptor.packageName} cpu metadata mismatch`);
+    if (descriptor.libc) assert.deepEqual(item.metadata.libc, [descriptor.libc], `${descriptor.packageName} libc metadata mismatch`);
     assert.equal(item.metadata.crap4tsBinary, descriptor.binaryPath, `${descriptor.packageName} binary mapping mismatch`);
     const standalone = path.join(directory, versionedArchiveName(version, target));
-    const standaloneBytes = execFileSync('tar', ['-xOf', standalone, `crap4ts-${target}/${descriptor.binaryName}`]);
-    const npmBytes = execFileSync('tar', ['-xOf', item.archive, `package/${descriptor.binaryPath}`]);
+    const tarOptions = { maxBuffer: 256 * 1024 * 1024 };
+    const standaloneBytes = execFileSync('tar', ['-xOf', standalone, `crap4ts-${target}/${descriptor.binaryName}`], tarOptions);
+    const npmBytes = execFileSync('tar', ['-xOf', item.archive, `package/${descriptor.binaryPath}`], tarOptions);
     assert.equal(hashFileBuffer(npmBytes), hashFileBuffer(standaloneBytes), `${target} standalone and npm binary payload differ`);
   }
   const meta = byName.get('crap4ts');

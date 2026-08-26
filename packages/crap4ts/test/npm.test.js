@@ -7,12 +7,17 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { pack, verifyNativePack } = require('../../../scripts/pack-platform.js');
-const { stage } = require('../../../scripts/stage-platform.js');
+const { stage, targets } = require('../../../scripts/stage-platform.js');
 
 const repositoryRoot = path.resolve(__dirname, '../../..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function runNpmExecutable(args, cwd = repositoryRoot) {
+  // Each test is hermetic: packaging tests may remove their temporary staged
+  // payload while node:test executes sibling tests concurrently.
+  const hostTarget = `${process.platform}-${process.arch}`;
+  const hostBinary = path.join(repositoryRoot, 'target', 'debug', targets[hostTarget].binaryName);
+  if (fs.existsSync(hostBinary)) stage(hostTarget, hostBinary);
   return spawnSync(
     npm,
     [
