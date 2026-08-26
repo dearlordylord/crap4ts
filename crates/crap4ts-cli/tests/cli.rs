@@ -903,3 +903,298 @@ fn path_threshold_override_uses_normalized_project_identity() {
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
     assert_eq!(report["rows"][0]["crap"], 1.0);
 }
+
+#[cfg(unix)]
+fn generated_config(fixture: &Fixture, coverage: Value, command: Value) {
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "sources": ["src/fixture.ts"],
+            "coverage": {
+                "path": coverage,
+                "format": "istanbul",
+                "command": command
+            },
+            "format": "json"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn shell_command(script: &str) -> Value {
+    json!(["sh", "-c", script])
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_mode_removes_stale_artifact_and_accepts_same_bytes_as_fresh() {
+    let fixture = Fixture::new();
+    fs::copy(
+        fixture.root.join("coverage-final.json"),
+        fixture.root.join("coverage-template.json"),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("coverage-final.json"), b"stale").unwrap();
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        shell_command("cp coverage-template.json coverage-final.json"),
+    );
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run generated analysis");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(report["rows"][0]["coverage"]["status"], "measured");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_generation_command_preserves_program_and_argument_boundaries() {
+    let fixture = Fixture::new();
+    fs::copy(
+        fixture.root.join("coverage-final.json"),
+        fixture.root.join("coverage-template.json"),
+    )
+    .unwrap();
+    fs::write(fixture.root.join("coverage-final.json"), b"stale").unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args([
+            "--coverage",
+            "coverage-final.json",
+            "src/fixture.ts",
+            "--format",
+            "json",
+            "--coverage-command",
+            "cp",
+            "--coverage-arg",
+            "coverage-template.json",
+            "--coverage-arg",
+            "coverage-final.json",
+        ])
+        .output()
+        .expect("run CLI-configured generation");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["version"],
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_mode_stops_on_command_failure_and_never_reuses_stale_or_partial_output() {
+    let fixture = Fixture::new();
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        shell_command("printf 'command output\\n'; exit 7"),
+    );
+    let failed = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run failed generation");
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(failed.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("command output"));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("coverage command failed"));
+    assert!(!fixture.root.join("coverage-final.json").exists());
+
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        shell_command("printf partial > coverage-final.json; exit 9"),
+    );
+    let partial = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run partial failed generation");
+    assert_eq!(partial.status.code(), Some(1));
+    assert!(partial.stdout.is_empty());
+    assert_eq!(
+        fs::read(fixture.root.join("coverage-final.json")).unwrap(),
+        b"partial"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_mode_requires_a_new_readable_artifact() {
+    let fixture = Fixture::new();
+    generated_config(&fixture, json!("coverage-final.json"), shell_command(":"));
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run missing artifact generation");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did not produce fresh"));
+    assert!(!fixture.root.join("coverage-final.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_child_output_is_raw_stderr_and_cannot_corrupt_json_stdout() {
+    let fixture = Fixture::new();
+    fs::copy(
+        fixture.root.join("coverage-final.json"),
+        fixture.root.join("coverage-template.json"),
+    )
+    .unwrap();
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        shell_command(
+            "head -c 131072 /dev/zero; printf '\\377child-stderr\\n' >&2; cp coverage-template.json coverage-final.json",
+        ),
+    );
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run noisy generation");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON stdout remains valid");
+    assert_eq!(report["version"], 1);
+    assert!(output.stderr.windows(2).any(|bytes| bytes == b"\0\0"));
+    assert!(output
+        .stderr
+        .windows(13)
+        .any(|bytes| bytes == b"child-stderr\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_mode_rejects_traversal_root_directories_and_symlink_escapes() {
+    let fixture = Fixture::new();
+    let outside = fixture
+        .root
+        .parent()
+        .unwrap()
+        .join(format!("crap4ts-generated-outside-{}", std::process::id()));
+    fs::write(&outside, b"outside sentinel").unwrap();
+    let outside_name = outside.file_name().unwrap().to_string_lossy().into_owned();
+    generated_config(
+        &fixture,
+        json!(format!("../{outside_name}")),
+        shell_command(&format!("printf should-not-run > ../{outside_name}")),
+    );
+    let traversal = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run traversal generation");
+    assert_eq!(traversal.status.code(), Some(1));
+    assert!(traversal.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&traversal.stderr).contains("unsafe coverage artifact path"));
+    assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+
+    generated_config(&fixture, json!("."), shell_command("true"));
+    let root = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run root generation");
+    assert_eq!(root.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&root.stderr).contains("unsafe coverage artifact path"));
+
+    fs::create_dir(fixture.root.join("artifact-dir")).unwrap();
+    generated_config(&fixture, json!("artifact-dir"), shell_command("true"));
+    let directory = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run directory generation");
+    assert_eq!(directory.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&directory.stderr).contains("must be a regular file"));
+
+    fs::create_dir(fixture.root.join("outside-parent")).unwrap();
+    std::os::unix::fs::symlink(
+        fixture.root.join("outside-parent"),
+        fixture.root.join("generated-parent"),
+    )
+    .unwrap();
+    generated_config(
+        &fixture,
+        json!("generated-parent/coverage-final.json"),
+        shell_command("touch generated-parent/coverage-final.json"),
+    );
+    let symlink_parent = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run symlink-parent generation");
+    assert_eq!(symlink_parent.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&symlink_parent.stderr).contains("symlink ancestor"));
+    assert!(!fixture
+        .root
+        .join("outside-parent/coverage-final.json")
+        .exists());
+
+    fs::remove_file(fixture.root.join("coverage-final.json")).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("coverage-final.json")).unwrap();
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        shell_command("cp coverage-template.json coverage-final.json"),
+    );
+    let symlink_target = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run symlink-target generation");
+    assert_eq!(symlink_target.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&symlink_target.stderr).contains("symlink"));
+    assert!(
+        fs::symlink_metadata(fixture.root.join("coverage-final.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+    let _ = fs::remove_file(&outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_artifact_mode_never_runs_configured_command_or_cleans_artifact() {
+    let fixture = Fixture::new();
+    let original = fs::read(fixture.root.join("coverage-final.json")).unwrap();
+    generated_config(
+        &fixture,
+        json!("coverage-final.json"),
+        json!(["command-that-does-not-exist", "--would-fail"]),
+    );
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--no-generate"])
+        .output()
+        .expect("run existing-artifact mode");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("coverage-final.json")).unwrap(),
+        original
+    );
+    assert!(output.stderr.is_empty());
+}
