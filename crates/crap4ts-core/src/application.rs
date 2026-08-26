@@ -3,7 +3,7 @@
 use std::{cmp::Ordering, path::Path};
 
 use crate::{
-    coverage::{CoverageAdapter, IstanbulCoverage},
+    coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
     domain::{
         Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportRow,
         SourceFile,
@@ -45,8 +45,22 @@ pub fn analyze_with_root(
     threshold: u32,
     allow_unknown: bool,
 ) -> Result<Report, CoreError> {
-    let coverage = IstanbulCoverage::parse(coverage_json, root)?;
-    let coverage_adapter: &dyn CoverageAdapter = &coverage;
+    let coverage = make_coverage_adapter(CoverageFormat::Istanbul, coverage_json, root)?;
+    analyze_with_adapter(sources, coverage.as_ref(), threshold, allow_unknown)
+}
+
+/// Analyze source files with an already constructed coverage adapter.
+///
+/// Parsing and format-specific attribution stay behind [`CoverageAdapter`].
+/// This is the common application path for Istanbul, LCOV, and future
+/// adapters; scoring, gate policy, and renderers consume only normalized
+/// [`Coverage`] values.
+pub fn analyze_with_adapter(
+    sources: &[SourceFile],
+    coverage_adapter: &dyn CoverageAdapter,
+    threshold: u32,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
     let mut units = Vec::new();
     for source_file in sources {
         units.extend(source::analyze_source(
@@ -73,9 +87,15 @@ pub fn analyze_with_root(
                 format!("missing coverage evidence for '{}': {reason}", unit.id),
             ));
             if !allow_unknown {
+                diagnostics.sort_by(|left, right| {
+                    left.category
+                        .cmp(&right.category)
+                        .then_with(|| left.message.cmp(&right.message))
+                });
                 return Err(CoreError::MissingEvidence {
                     path: unit.path.to_string(),
                     reason: reason.clone(),
+                    diagnostics: diagnostics.clone(),
                 });
             }
         }
@@ -116,6 +136,19 @@ pub fn analyze_with_root(
         rows,
         diagnostics,
     })
+}
+
+/// Analyze an artifact after selecting its coverage format.
+pub fn analyze_with_root_and_format(
+    sources: &[SourceFile],
+    coverage_input: &str,
+    root: &Path,
+    format: CoverageFormat,
+    threshold: u32,
+    allow_unknown: bool,
+) -> Result<Report, CoreError> {
+    let adapter = make_coverage_adapter(format, coverage_input, root)?;
+    analyze_with_adapter(sources, adapter.as_ref(), threshold, allow_unknown)
 }
 
 fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {

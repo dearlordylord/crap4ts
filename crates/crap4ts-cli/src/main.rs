@@ -5,7 +5,10 @@ use std::{
 };
 
 use clap::{error::ErrorKind, Parser, ValueEnum};
-use crap4ts_core::{analyze_with_root, collect_sources, render_json, render_text};
+use crap4ts_core::{
+    analyze_with_adapter, collect_sources, make_coverage_adapter, render_json, render_text,
+    CoverageFormat, Diagnostic,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum OutputFormat {
@@ -18,10 +21,10 @@ enum OutputFormat {
     name = "crap4ts",
     version,
     about = "Calculate CRAP complexity risk for TypeScript functions",
-    long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON artifact."
+    long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON or LCOV artifact."
 )]
 struct Cli {
-    /// Existing Istanbul coverage-final.json (generated mode is not part of v1 minimal path).
+    /// Existing coverage artifact (generated mode is not part of v1 minimal path).
     #[arg(
         short = 'c',
         long = "coverage",
@@ -29,6 +32,10 @@ struct Cli {
         value_name = "PATH"
     )]
     coverage: PathBuf,
+
+    /// Coverage artifact format. Supported values are `istanbul` and `lcov`.
+    #[arg(long = "coverage-format", default_value_t = CoverageFormat::Istanbul, value_name = "FORMAT")]
+    coverage_format: CoverageFormat,
 
     /// Render a human-readable report or the versioned JSON report.
     #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Text)]
@@ -83,25 +90,64 @@ fn run() -> i32 {
 
     match execute(&cli) {
         Ok(status) => status,
-        Err(message) => {
-            render_failure(&message, cli.json || cli.format == OutputFormat::Json);
+        Err(failure) => {
+            render_failure(
+                &failure.message,
+                cli.json || cli.format == OutputFormat::Json,
+                &failure.diagnostics,
+            );
             1
         }
     }
 }
 
-fn render_failure(message: &str, json_output: bool) {
+#[derive(Debug)]
+struct CliFailure {
+    message: String,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl From<String> for CliFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+fn render_failure(message: &str, json_output: bool, diagnostics: &[Diagnostic]) {
     let category = diagnostic_category(message);
     if json_output {
+        let entries = if diagnostics.is_empty() {
+            vec![serde_json::json!({"category": category, "message": message})]
+        } else {
+            diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    serde_json::to_value(diagnostic).expect("diagnostic is serializable")
+                })
+                .collect()
+        };
         let document = serde_json::json!({
-            "diagnostics": [{"category": category, "message": message}]
+            "diagnostics": entries
         });
         // This is intentionally written to stderr: JSON stdout remains
         // reserved for completed versioned reports.
         eprintln!("{}", document);
     } else {
         eprintln!("error: {message}");
-        eprintln!("diagnostic [{category}]: {message}");
+        if diagnostics.is_empty() {
+            eprintln!("diagnostic [{category}]: {message}");
+        } else {
+            for diagnostic in diagnostics {
+                eprintln!(
+                    "diagnostic [{}]: {}",
+                    diagnostic.category.as_label(),
+                    diagnostic.message
+                );
+            }
+        }
     }
 }
 
@@ -121,13 +167,17 @@ fn diagnostic_category(message: &str) -> &'static str {
     }
 }
 
-fn execute(cli: &Cli) -> Result<i32, String> {
+fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     let root = canonicalize_path(&cli.project_root, "project root")?;
     let mut requested = cli.source_paths.clone();
     requested.extend(cli.source_options.iter().cloned());
     let sources = collect_sources(&root, &requested).map_err(|error| error.to_string())?;
     if sources.is_empty() {
-        return Err("configuration: source selection produced no TypeScript files".to_string());
+        return Err(
+            "configuration: source selection produced no TypeScript files"
+                .to_string()
+                .into(),
+        );
     }
 
     let coverage_path = if cli.coverage.is_absolute() {
@@ -141,8 +191,13 @@ fn execute(cli: &Cli) -> Result<i32, String> {
             coverage_path.display()
         )
     })?;
-    let report = analyze_with_root(&sources, &coverage, &root, cli.threshold, cli.report_only)
+    let adapter = make_coverage_adapter(cli.coverage_format, &coverage, &root)
         .map_err(|error| error.to_string())?;
+    let report = analyze_with_adapter(&sources, adapter.as_ref(), cli.threshold, cli.report_only)
+        .map_err(|error| CliFailure {
+        message: error.to_string(),
+        diagnostics: error.diagnostics().to_vec(),
+    })?;
 
     if cli.json || cli.format == OutputFormat::Json {
         let document = render_json(&report)
