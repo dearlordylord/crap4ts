@@ -140,6 +140,74 @@ fn black_box_text_and_threshold_statuses_are_stable() {
 }
 
 #[test]
+fn lcov_format_selection_uses_the_same_report_contract() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("lcov.info"),
+        "TN:\nSF:src/fixture.ts\nFN:1,greet\nFNDA:1,greet\nFNF:1\nFNH:1\nDA:1,1\nLF:1\nLH:1\nend_of_record\n",
+    )
+    .expect("write LCOV fixture");
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args([
+            "--coverage",
+            "lcov.info",
+            "--coverage-format",
+            "lcov",
+            "src/fixture.ts",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run LCOV analysis");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
+    assert_eq!(report["rows"][0]["coverage"]["status"], "measured");
+    assert_eq!(report["rows"][0]["coverage"]["covered"], 1);
+    assert_eq!(report["rows"][0]["coverage"]["total"], 1);
+}
+
+#[test]
+fn strict_lcov_failures_retain_attribution_diagnostics_in_json_stderr() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/fixture.ts"),
+        "const first = () => 1; const second = () => 2;\n",
+    )
+    .expect("replace source with ambiguous fixture");
+    fs::write(
+        fixture.root.join("lcov.info"),
+        "TN:\nSF:src/fixture.ts\nFN:1,first\nFN:1,second\nFNDA:1,first\nFNDA:1,second\nFNF:2\nFNH:2\nDA:1,1\nLF:1\nLH:1\nend_of_record\n",
+    )
+    .expect("write ambiguous LCOV fixture");
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args([
+            "--coverage",
+            "lcov.info",
+            "--coverage-format",
+            "lcov",
+            "src/fixture.ts",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run strict LCOV analysis");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let diagnostics: Value = serde_json::from_slice(&output.stderr).expect("structured stderr");
+    let categories = diagnostics["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["category"].as_str())
+        .collect::<Vec<_>>();
+    assert!(categories.contains(&"coverage_attribution"));
+    assert!(categories.contains(&"missing_evidence"));
+}
+
+#[test]
 fn source_identity_is_canonical_for_redundant_path_segments() {
     let fixture = Fixture::new();
     let output = run_with_source(&fixture, &["--format", "json"], &["src/../src/fixture.ts"]);
