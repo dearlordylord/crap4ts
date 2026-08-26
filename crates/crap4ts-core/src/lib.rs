@@ -11,7 +11,9 @@ mod path;
 mod report;
 mod source;
 
-pub use application::{analyze, analyze_with_root, crap_score};
+pub use application::{
+    analyze, analyze_with_policy, analyze_with_root, crap_score, ThresholdPolicy,
+};
 pub use domain::{
     Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionKind, FunctionUnit,
     ProjectRelativePath, Report, ReportRow, SourceFile, SourcePosition, SourceRange,

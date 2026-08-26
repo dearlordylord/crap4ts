@@ -641,3 +641,131 @@ fn symlink_targets_in_excluded_directories_are_not_selected() {
     assert_eq!(report["rows"].as_array().unwrap().len(), 1);
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }
+
+#[test]
+fn project_config_supplies_values_and_explicit_cli_wins() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "sources": ["src/fixture.ts"],
+            "coverage": "coverage-final.json",
+            "format": "json",
+            "threshold": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let configured = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--config")
+        .arg("crap4ts.json")
+        .output()
+        .expect("run configured crap4ts");
+    assert_eq!(configured.status.code(), Some(2));
+    let configured_report: Value =
+        serde_json::from_slice(&configured.stdout).expect("configured JSON report");
+    assert_eq!(configured_report["version"], 1);
+    assert_eq!(configured_report["threshold"], 0);
+    assert!(String::from_utf8_lossy(&configured.stderr).contains("quality gate breached"));
+
+    let overridden = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--config", "crap4ts.json", "--threshold", "1"])
+        .output()
+        .expect("run CLI-overridden crap4ts");
+    assert_eq!(overridden.status.code(), Some(0));
+    let overridden_report: Value =
+        serde_json::from_slice(&overridden.stdout).expect("overridden JSON report");
+    assert_eq!(overridden_report["threshold"], 1);
+    assert!(overridden.stderr.is_empty());
+}
+
+#[test]
+fn discovered_config_is_strict_and_data_only() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "coverage": "coverage-final.json",
+            "sources": ["src/fixture.ts"],
+            "run": "echo should never execute"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let unknown = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run unknown-field config");
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(unknown.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown field"));
+
+    fs::remove_file(fixture.root.join("crap4ts.json")).unwrap();
+    fs::write(
+        fixture.root.join("crap4ts.config.js"),
+        "module.exports = { coverage: 'coverage-final.json' };",
+    )
+    .unwrap();
+    let executable = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--config", "crap4ts.config.js"])
+        .output()
+        .expect("run executable config");
+    assert_eq!(executable.status.code(), Some(1));
+    assert!(executable.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&executable.stderr).contains("executable config"));
+}
+
+#[test]
+fn config_report_only_retains_unknown_rows_without_a_score() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("coverage-final.json"), b"{}").unwrap();
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "coverage": "coverage-final.json",
+            "sources": ["src/fixture.ts"],
+            "report": {"format": "json"},
+            "missing_evidence": "report_only"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run report-only config");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(report["rows"][0]["coverage"]["status"], "unknown");
+    assert!(report["rows"][0]["crap"].is_null());
+}
+
+#[test]
+fn path_threshold_override_uses_normalized_project_identity() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "coverage": "coverage-final.json",
+            "sources": ["src/fixture.ts"],
+            "format": "json",
+            "threshold": 0,
+            "thresholds": {"src\\fixture.ts": 1}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .expect("run path-threshold config");
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
+    assert_eq!(report["rows"][0]["crap"], 1.0);
+}

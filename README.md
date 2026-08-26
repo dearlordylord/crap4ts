@@ -54,6 +54,35 @@ cargo run -p crap4ts -- --coverage coverage-final.json src --format json --thres
 cargo run -p crap4ts -- --coverage coverage-final.json --source src --source lib
 ```
 
+The same inputs can be supplied by a project-local `crap4ts.json` file (the
+`.crap4ts.json` and `crap4ts.config.json` spellings are also discovered). The
+configuration is JSON data only; executable JavaScript configuration and
+unknown fields are rejected. A minimal configuration is:
+
+```json
+{
+  "sources": ["src"],
+  "coverage": "coverage-final.json",
+  "format": "json",
+  "threshold": 8,
+  "thresholds": {"src/legacy.ts": 12},
+  "missing_evidence": "error"
+}
+```
+
+`coverage` may also be an object with `path` and `format` fields. `report` or
+`reports` may contain `format: "text"` or `format: "json"`. Set
+`missing_evidence` to `"report_only"` (or use `report_only: true`) to retain
+unknown rows without assigning them a score. Threshold keys are exact
+project-relative paths; separators are normalized and basename or glob
+matching is never used.
+
+Values are resolved in this order: built-in defaults, project configuration,
+then explicitly supplied CLI options. The default global threshold is `8`,
+and a gate fails only when a measured score is strictly greater than its
+effective global or path threshold. `--config PATH` selects a configuration
+explicitly; its file must remain inside `--project-root`.
+
 Exit status `0` means the quality gate passed, `1` means invalid input or
 analysis failure, and `2` means a score strictly exceeded the configured
 threshold. JSON stdout contains only the versioned report; diagnostics and

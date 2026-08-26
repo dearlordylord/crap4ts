@@ -1,17 +1,14 @@
+mod config;
+
 use std::{
     fs,
     path::{Path, PathBuf},
     process,
 };
 
-use clap::{error::ErrorKind, Parser, ValueEnum};
-use crap4ts_core::{analyze_with_root, collect_sources, render_json, render_text};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum OutputFormat {
-    Text,
-    Json,
-}
+use clap::{error::ErrorKind, Parser};
+use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
+use crap4ts_core::{analyze_with_policy, collect_sources, render_json, render_text};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -21,39 +18,43 @@ enum OutputFormat {
     long_about = "Analyze TypeScript/TSX source against an existing Istanbul JSON artifact."
 )]
 struct Cli {
-    /// Existing Istanbul coverage-final.json (generated mode is not part of v1 minimal path).
+    /// Optional project-local JSON configuration file. If omitted, crap4ts.json
+    /// (or a supported dot/config spelling) is discovered at the project root.
+    #[arg(long = "config", visible_alias = "config-file", value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Existing coverage artifact. Configuration may provide this value.
     #[arg(
         short = 'c',
         long = "coverage",
         visible_alias = "coverage-file",
         value_name = "PATH"
     )]
-    coverage: PathBuf,
+    coverage: Option<PathBuf>,
 
     /// Render a human-readable report or the versioned JSON report.
-    #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Text)]
-    format: OutputFormat,
+    #[arg(short = 'f', long = "format", value_name = "FORMAT")]
+    format: Option<OutputFormat>,
 
     /// Optional shorthand for --format json.
     #[arg(long, conflicts_with = "format")]
     json: bool,
 
     /// Maximum permitted CRAP score. A score strictly above this value fails with status 2.
-    #[arg(
-        short = 't',
-        long = "threshold",
-        default_value_t = 8,
-        value_name = "NUMBER"
-    )]
-    threshold: u32,
+    #[arg(short = 't', long = "threshold", value_name = "NUMBER")]
+    threshold: Option<u32>,
 
     /// Keep rows whose coverage cannot be measured, assigning them unknown rather than failing.
-    #[arg(long = "report-only")]
+    #[arg(long = "report-only", conflicts_with = "no_report_only")]
     report_only: bool,
 
+    /// Explicitly fail on missing evidence, overriding report-only configuration.
+    #[arg(long = "no-report-only", conflicts_with = "report_only")]
+    no_report_only: bool,
+
     /// Project root used to make source identities deterministic and constrain discovery.
-    #[arg(long = "project-root", default_value = ".", value_name = "PATH")]
-    project_root: PathBuf,
+    #[arg(long = "project-root", value_name = "PATH")]
+    project_root: Option<PathBuf>,
 
     /// Explicit source roots or files. With no value, the project root is scanned.
     #[arg(value_name = "SOURCE")]
@@ -84,7 +85,7 @@ fn run() -> i32 {
     match execute(&cli) {
         Ok(status) => status,
         Err(message) => {
-            render_failure(&message, cli.json || cli.format == OutputFormat::Json);
+            render_failure(&message, cli.json || cli.format == Some(OutputFormat::Json));
             1
         }
     }
@@ -96,8 +97,7 @@ fn render_failure(message: &str, json_output: bool) {
         let document = serde_json::json!({
             "diagnostics": [{"category": category, "message": message}]
         });
-        // This is intentionally written to stderr: JSON stdout remains
-        // reserved for completed versioned reports.
+        // JSON stdout remains reserved for completed versioned reports.
         eprintln!("{}", document);
     } else {
         eprintln!("error: {message}");
@@ -122,18 +122,53 @@ fn diagnostic_category(message: &str) -> &'static str {
 }
 
 fn execute(cli: &Cli) -> Result<i32, String> {
-    let root = canonicalize_path(&cli.project_root, "project root")?;
-    let mut requested = cli.source_paths.clone();
-    requested.extend(cli.source_options.iter().cloned());
+    let root_hint = cli
+        .project_root
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."));
+    let root = canonicalize_path(root_hint, "project root")?;
+    let values = load_config(cli, &root)?;
+
+    let coverage = cli
+        .coverage
+        .clone()
+        .or_else(|| values.coverage.clone())
+        .ok_or_else(|| {
+            "configuration: coverage artifact is required (provide --coverage or config)"
+                .to_string()
+        })?;
+    let mut requested = if cli.source_paths.is_empty() && cli.source_options.is_empty() {
+        values.sources.clone().unwrap_or_default()
+    } else {
+        cli.source_paths.clone()
+    };
+    if !(cli.source_paths.is_empty() && cli.source_options.is_empty()) {
+        requested.extend(cli.source_options.iter().cloned());
+    }
     let sources = collect_sources(&root, &requested).map_err(|error| error.to_string())?;
     if sources.is_empty() {
         return Err("configuration: source selection produced no TypeScript files".to_string());
     }
 
-    let coverage_path = if cli.coverage.is_absolute() {
-        cli.coverage.clone()
+    let format = resolved_format(cli, &values);
+    let threshold = cli
+        .threshold
+        .or(values.threshold)
+        .unwrap_or(DEFAULT_THRESHOLD);
+    let report_only = if cli.report_only {
+        true
+    } else if cli.no_report_only {
+        false
     } else {
-        root.join(&cli.coverage)
+        values.report_only.unwrap_or(false)
+    };
+    validate_coverage_format(values.coverage_format.as_deref())?;
+    let policy = config::policy(&values, threshold);
+
+    let coverage_path = if coverage.is_absolute() {
+        coverage
+    } else {
+        root.join(coverage)
     };
     let coverage = fs::read_to_string(&coverage_path).map_err(|error| {
         format!(
@@ -141,10 +176,10 @@ fn execute(cli: &Cli) -> Result<i32, String> {
             coverage_path.display()
         )
     })?;
-    let report = analyze_with_root(&sources, &coverage, &root, cli.threshold, cli.report_only)
+    let report = analyze_with_policy(&sources, &coverage, &root, &policy, report_only)
         .map_err(|error| error.to_string())?;
 
-    if cli.json || cli.format == OutputFormat::Json {
+    if format == OutputFormat::Json {
         let document = render_json(&report)
             .map_err(|error| format!("configuration: unable to render JSON report: {error}"))?;
         println!("{document}");
@@ -152,15 +187,57 @@ fn execute(cli: &Cli) -> Result<i32, String> {
         print!("{}", render_text(&report));
     }
 
-    if report.gate_breached() {
-        eprintln!(
-            "quality gate breached: one or more CRAP scores exceed {}",
-            cli.threshold
-        );
+    if policy.gate_breached(&report) {
+        eprintln!("quality gate breached: one or more CRAP scores exceed the effective threshold");
         Ok(2)
     } else {
         Ok(0)
     }
+}
+
+fn load_config(cli: &Cli, root: &Path) -> Result<ConfigValues, String> {
+    let path = if let Some(path) = &cli.config {
+        Some(resolve_config_argument(path)?)
+    } else {
+        config::discover(root)?
+    };
+    path.map_or_else(
+        || Ok(ConfigValues::default()),
+        |path| config::load(&path, root),
+    )
+}
+
+fn resolve_config_argument(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let current = std::env::current_dir()
+        .map_err(|error| format!("configuration: unable to resolve current directory: {error}"))?;
+    Ok(current.join(path))
+}
+
+fn resolved_format(cli: &Cli, values: &ConfigValues) -> OutputFormat {
+    if cli.json {
+        OutputFormat::Json
+    } else if let Some(format) = cli.format {
+        format
+    } else if values.json == Some(true) {
+        OutputFormat::Json
+    } else {
+        values.format.unwrap_or_default()
+    }
+}
+
+fn validate_coverage_format(format: Option<&str>) -> Result<(), String> {
+    if let Some(format) = format {
+        let normalized = format.trim().to_ascii_lowercase();
+        if !matches!(normalized.as_str(), "istanbul" | "istanbul-json" | "json") {
+            return Err(format!(
+                "configuration: unsupported coverage format '{format}' on this build"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn canonicalize_path(path: &Path, description: &str) -> Result<PathBuf, String> {
