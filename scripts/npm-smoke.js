@@ -12,7 +12,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { stage, targets } = require('./stage-platform.js');
 const { validateReport } = require('./validate-report.js');
-const { npmInvocation } = require('./npm-command.js');
+const { npmBinInvocation, npmInvocation } = require('./npm-command.js');
 
 const root = path.resolve(__dirname, '..');
 const target = `${process.platform}-${process.arch}`;
@@ -105,11 +105,14 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
 
   const executableName = process.platform === 'win32' ? 'crap4ts.cmd' : 'crap4ts';
   const executable = path.join(consumer, 'node_modules', '.bin', executableName);
-  const help = run(executable, ['--help'], consumer);
+  const invocation = (args) => npmBinInvocation(executable, args);
+  const helpCommand = invocation(['--help']);
+  const help = run(helpCommand.command, helpCommand.args, consumer, helpCommand.spawnOptions);
   assert.match(help.stdout, /Usage: crap4ts/);
 
   const fixtureRoot = copyMixedFixture(path.join(consumer, 'fixture'));
-  const installed = run(executable, ['--format', 'json'], fixtureRoot);
+  const analysisCommand = invocation(['--format', 'json']);
+  const installed = run(analysisCommand.command, analysisCommand.args, fixtureRoot, analysisCommand.spawnOptions);
   const report = assertMixedReport(installed, 'npm-installed binary');
   assert.equal(installed.stdout, expectedDirect.stdout, 'direct and npm-installed reports differ');
   return report;

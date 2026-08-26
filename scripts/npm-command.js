@@ -8,4 +8,12 @@ function npmInvocation(platform = process.platform, execPath = process.execPath,
   return { command: execPath, argsPrefix: [npmExecPath] };
 }
 
-module.exports = { npmInvocation };
+function npmBinInvocation(executable, args, platform = process.platform) {
+  return {
+    command: executable,
+    args,
+    spawnOptions: platform === 'win32' ? { shell: true } : {},
+  };
+}
+
+module.exports = { npmBinInvocation, npmInvocation };
