@@ -149,6 +149,29 @@ fn source_identity_is_canonical_for_redundant_path_segments() {
 }
 
 #[test]
+fn source_identity_accepts_windows_separators() {
+    let fixture = Fixture::new();
+    let output = run_with_source(&fixture, &["--format", "json"], &[r"src\fixture.ts"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
+}
+
+#[test]
+fn absolute_source_inside_project_root_is_accepted() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("src/fixture.ts");
+    let output = run_with_source(
+        &fixture,
+        &["--format", "json"],
+        &[source.to_str().expect("UTF-8 fixture path")],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("valid JSON report");
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
+}
+
+#[test]
 fn malformed_coverage_is_an_analysis_error() {
     let fixture = Fixture::new();
     fs::write(fixture.root.join("coverage-final.json"), b"{not json").expect("replace coverage");
@@ -273,11 +296,108 @@ fn built_in_test_file_exclusion_keeps_reportable_sources_only() {
         "function ignored() { return 1; }\n",
     )
     .unwrap();
-    let output = run(&fixture, &["--format", "json"]);
+    fs::create_dir_all(fixture.root.join("src/tests")).unwrap();
+    fs::write(
+        fixture.root.join("src/tests/ignored.ts"),
+        "function ignoredDirectory() { return 1; }\n",
+    )
+    .unwrap();
+    let output = run_with_source(&fixture, &["--format", "json"], &["src"]);
     assert_eq!(output.status.code(), Some(0));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["rows"].as_array().unwrap().len(), 1);
     assert_eq!(report["rows"][0]["name"], "greet");
+
+    let excluded_root = run_with_source(&fixture, &[], &["src/tests"]);
+    assert_eq!(excluded_root.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&excluded_root.stderr)
+        .contains("source selection produced no TypeScript files"));
+}
+
+#[test]
+fn directory_discovery_finds_tsx_and_deduplicates_source_roots() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/component.tsx"),
+        "export const Component = () => <span />;\n",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.root.join("lib")).unwrap();
+    fs::write(
+        fixture.root.join("lib/helper.ts"),
+        "export function helper() { return 1; }\n",
+    )
+    .unwrap();
+
+    let output = run_with_source(
+        &fixture,
+        &[
+            "--format",
+            "json",
+            "--report-only",
+            "--source",
+            "src",
+            "--source-root",
+            "src",
+            "--source",
+            "lib",
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths.len(),
+        3,
+        "duplicate source roots must not duplicate rows"
+    );
+    let mut sorted_paths = paths.clone();
+    sorted_paths.sort_unstable();
+    assert_eq!(
+        sorted_paths,
+        ["lib/helper.ts", "src/component.tsx", "src/fixture.ts"]
+    );
+}
+
+#[test]
+fn missing_and_empty_source_selections_are_explicit_errors() {
+    let fixture = Fixture::new();
+    let missing = run_with_source(&fixture, &[], &["does-not-exist"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("unable to resolve source"));
+
+    fs::create_dir(fixture.root.join("empty")).unwrap();
+    let empty = run_with_source(&fixture, &[], &["empty"]);
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("source selection produced no"));
+}
+
+#[test]
+fn parent_and_absolute_source_escape_attempts_are_rejected() {
+    let fixture = Fixture::new();
+    let outside_name = format!("crap4ts-outside-{}.ts", std::process::id());
+    let outside = fixture.root.parent().unwrap().join(&outside_name);
+    fs::write(&outside, "function outside() { return 1; }\n").unwrap();
+
+    let relative_name = format!("../{outside_name}");
+    let relative = run_with_source(&fixture, &[], &[relative_name.as_str()]);
+    assert_eq!(relative.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&relative.stderr).contains("escapes project root"));
+
+    let absolute = run_with_source(
+        &fixture,
+        &[],
+        &[outside.to_str().expect("UTF-8 fixture path")],
+    );
+    assert_eq!(absolute.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&absolute.stderr).contains("escapes project root"));
+    let _ = fs::remove_file(outside);
 }
 
 #[cfg(unix)]
@@ -288,4 +408,26 @@ fn symlink_directory_cycle_is_rejected_without_recursing() {
     let output = run_with_source(&fixture, &[], &["."]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("symlink directory"));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_source_escape_is_rejected_during_directory_discovery() {
+    let fixture = Fixture::new();
+    let outside = fixture
+        .root
+        .parent()
+        .unwrap()
+        .join(format!("crap4ts-symlink-outside-{}.ts", std::process::id()));
+    fs::write(&outside, "function outside() { return 1; }\n").unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("src/escaped.ts")).unwrap();
+
+    let output = run_with_source(&fixture, &[], &["src"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("escapes project root"),
+        "unexpected stderr: {stderr}"
+    );
+    let _ = fs::remove_file(outside);
 }

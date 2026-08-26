@@ -59,8 +59,8 @@ struct Cli {
     #[arg(value_name = "SOURCE")]
     source_paths: Vec<PathBuf>,
 
-    /// Additional source root or file (repeatable).
-    #[arg(long = "source", value_name = "PATH")]
+    /// Additional source root or file (repeatable). `--source-root` is an alias.
+    #[arg(long = "source", visible_alias = "source-root", value_name = "PATH")]
     source_options: Vec<PathBuf>,
 }
 
