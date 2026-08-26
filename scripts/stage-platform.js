@@ -5,13 +5,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const targets = Object.freeze({
-  'linux-x64': Object.freeze({ packageDirectory: 'crap4ts-linux-x64', binaryPath: 'bin/crap4ts', packageName: '@crap4ts/linux-x64', binaryName: 'crap4ts' }),
-  'linux-arm64': Object.freeze({ packageDirectory: 'crap4ts-linux-arm64', binaryPath: 'bin/crap4ts', packageName: '@crap4ts/linux-arm64', binaryName: 'crap4ts' }),
-  'darwin-x64': Object.freeze({ packageDirectory: 'crap4ts-darwin-x64', binaryPath: 'bin/crap4ts', packageName: '@crap4ts/darwin-x64', binaryName: 'crap4ts' }),
-  'darwin-arm64': Object.freeze({ packageDirectory: 'crap4ts-darwin-arm64', binaryPath: 'bin/crap4ts', packageName: '@crap4ts/darwin-arm64', binaryName: 'crap4ts' }),
-  'win32-x64': Object.freeze({ packageDirectory: 'crap4ts-win32-x64', binaryPath: 'bin/crap4ts.exe', packageName: '@crap4ts/win32-x64', binaryName: 'crap4ts.exe' }),
-});
+const targetDefinitions = JSON.parse(
+  fs.readFileSync(path.join(root, 'release-targets.json'), 'utf8'),
+);
+const targets = Object.freeze(
+  Object.fromEntries(
+    Object.entries(targetDefinitions).map(([target, descriptor]) => [
+      target,
+      Object.freeze({ ...descriptor }),
+    ]),
+  ),
+);
 
 function usage() {
   return [
@@ -56,8 +60,16 @@ function parseArgs(args) {
 }
 
 function binaryForDirectory(directory, target) {
-  const names = [target, `crap4ts-${target}`];
-  if (target === 'win32-x64') {
+  const descriptor = targets[target];
+  if (!descriptor) {
+    throw new Error(`unsupported target ${JSON.stringify(target)}; expected ${Object.keys(targets).join(', ')}`);
+  }
+  const names = [
+    descriptor.binaryName,
+    target,
+    `crap4ts-${target}`,
+  ];
+  if (descriptor.binaryName.endsWith('.exe')) {
     names.push(`${target}.exe`, `crap4ts-${target}.exe`);
   }
   for (const name of names) {
@@ -85,17 +97,20 @@ function stage(target, source) {
     );
   }
   const sourcePath = path.resolve(source);
-  const sourceStats = fs.statSync(sourcePath);
+  const sourceStats = fs.lstatSync(sourcePath);
+  if (sourceStats.isSymbolicLink()) {
+    throw new Error(`prebuilt binary ${sourcePath} must not be a symlink`);
+  }
   if (!sourceStats.isFile()) {
     throw new Error(`prebuilt binary ${sourcePath} is not a file`);
   }
-  if (!target.startsWith('win32-') && (sourceStats.mode & 0o111) === 0) {
+  if (descriptor.os !== 'win32' && (sourceStats.mode & 0o111) === 0) {
     throw new Error(`prebuilt binary ${sourcePath} is not executable`);
   }
   const destination = path.join(packageRoot, descriptor.binaryPath);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.copyFileSync(sourcePath, destination);
-  if (!target.startsWith('win32-')) {
+  if (descriptor.os !== 'win32') {
     fs.chmodSync(destination, 0o755);
   }
   process.stdout.write(`staged ${target}: ${destination}\n`);

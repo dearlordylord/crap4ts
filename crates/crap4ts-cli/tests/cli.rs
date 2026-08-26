@@ -1533,7 +1533,7 @@ fn generated_child_output_is_raw_stderr_and_cannot_corrupt_json_stdout() {
         &fixture,
         json!("coverage-final.json"),
         shell_command(
-            "head -c 131072 /dev/zero; printf '\\377child-stderr\\n' >&2; cp coverage-template.json coverage-final.json",
+            "(head -c 262144 /dev/zero; printf '\\377child-stdout\\n') & (head -c 262144 /dev/zero; printf '\\377child-stderr\\n' >&2) & wait; cp coverage-template.json coverage-final.json",
         ),
     );
     let output = Command::new(binary())
@@ -1553,6 +1553,10 @@ fn generated_child_output_is_raw_stderr_and_cannot_corrupt_json_stdout() {
         .stderr
         .windows(13)
         .any(|bytes| bytes == b"child-stderr\n"));
+    assert!(output
+        .stderr
+        .windows(13)
+        .any(|bytes| bytes == b"child-stdout\n"));
 }
 
 #[cfg(unix)]

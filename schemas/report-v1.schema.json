@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crap4ts.dev/schemas/report-v1.schema.json",
+  "title": "crap4ts single-project report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "threshold", "rows", "diagnostics"],
+  "properties": {
+    "version": { "const": 1 },
+    "threshold": { "type": "integer", "minimum": 0 },
+    "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+  },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "line", "column"],
+      "properties": {
+        "offset": { "type": "integer", "minimum": 0 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/$defs/position" },
+        "end": { "$ref": "#/$defs/position" }
+      }
+    },
+    "coverage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "covered", "total", "fraction"],
+          "properties": {
+            "status": { "const": "measured" },
+            "covered": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 1 },
+            "fraction": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "const": "unknown" },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "name", "kind", "range", "complexity", "coverage", "crap"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["arrow", "constructor", "function_declaration", "function_expression", "getter", "method", "setter"] },
+        "range": { "$ref": "#/$defs/range" },
+        "complexity": { "type": "integer", "minimum": 1 },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "crap": { "type": ["number", "null"] }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "message"],
+      "properties": {
+        "category": { "enum": ["configuration", "coverage_attribution", "coverage_command", "coverage_parsing", "missing_evidence", "source_parsing", "threshold_breach", "unsafe_path"] },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

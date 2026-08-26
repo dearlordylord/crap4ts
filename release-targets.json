@@ -1,0 +1,59 @@
+{
+  "linux-x64": {
+    "runner": "ubuntu-24.04",
+    "rustTarget": "x86_64-unknown-linux-gnu",
+    "os": "linux",
+    "cpu": "x64",
+    "libc": "glibc",
+    "packageDirectory": "crap4ts-linux-x64",
+    "packageName": "@crap4ts/linux-x64",
+    "binaryName": "crap4ts",
+    "binaryPath": "bin/crap4ts",
+    "archiveExtension": "tar.gz"
+  },
+  "linux-arm64": {
+    "runner": "ubuntu-24.04-arm",
+    "rustTarget": "aarch64-unknown-linux-gnu",
+    "os": "linux",
+    "cpu": "arm64",
+    "libc": "glibc",
+    "packageDirectory": "crap4ts-linux-arm64",
+    "packageName": "@crap4ts/linux-arm64",
+    "binaryName": "crap4ts",
+    "binaryPath": "bin/crap4ts",
+    "archiveExtension": "tar.gz"
+  },
+  "darwin-x64": {
+    "runner": "macos-15-intel",
+    "rustTarget": "x86_64-apple-darwin",
+    "os": "darwin",
+    "cpu": "x64",
+    "packageDirectory": "crap4ts-darwin-x64",
+    "packageName": "@crap4ts/darwin-x64",
+    "binaryName": "crap4ts",
+    "binaryPath": "bin/crap4ts",
+    "archiveExtension": "tar.gz"
+  },
+  "darwin-arm64": {
+    "runner": "macos-15",
+    "rustTarget": "aarch64-apple-darwin",
+    "os": "darwin",
+    "cpu": "arm64",
+    "packageDirectory": "crap4ts-darwin-arm64",
+    "packageName": "@crap4ts/darwin-arm64",
+    "binaryName": "crap4ts",
+    "binaryPath": "bin/crap4ts",
+    "archiveExtension": "tar.gz"
+  },
+  "win32-x64": {
+    "runner": "windows-latest",
+    "rustTarget": "x86_64-pc-windows-msvc",
+    "os": "win32",
+    "cpu": "x64",
+    "packageDirectory": "crap4ts-win32-x64",
+    "packageName": "@crap4ts/win32-x64",
+    "binaryName": "crap4ts.exe",
+    "binaryPath": "bin/crap4ts.exe",
+    "archiveExtension": "tar.gz"
+  }
+}

@@ -25,3 +25,30 @@ There is no postinstall download. If npm optional dependencies are disabled,
 or a platform package is missing, the executable reports the package and
 platform that need to be installed. Unsupported platforms can use the direct
 Cargo-built binary instead.
+
+The CLI reads `crap4ts.json` (or `.crap4ts.json`/`crap4ts.config.json`) as
+strict JSON. A project can use an existing Istanbul artifact (the default), an
+LCOV tracefile (`--coverage-format lcov`), or a direct argv coverage command.
+Generated commands are never shell-split; Windows `.cmd`/`.bat` shims are
+rejected, so use a native `.exe` (for example `node.exe` plus npm-cli.js) rather than
+`npm` in a command array. Generated coverage is deleted and recreated only
+inside the project root, and child output is forwarded to stderr.
+
+Use `--format text` for a terminal report or `--format json` for the stable
+versioned contract. Single-project output is [JSON schema v1](https://github.com/dearlordylord/crap4ts/blob/main/schemas/report-v1.schema.json);
+independent package groups use [schema v2](https://github.com/dearlordylord/crap4ts/blob/main/schemas/report-v2.schema.json).
+Exit status `0` is a passing gate, `1` is invalid input/analysis failure, and
+`2` is a measured score above its threshold. Unknown coverage remains unknown;
+`--report-only` only keeps those rows in the report.
+
+The native target set is Linux x64/arm64 (glibc), macOS x64/arm64, and Windows
+x64. The npm wrapper contains no analyzer implementation and does not download
+executables at install time. JavaScript sources, raw V8 coverage, source-map
+reconstruction, HTML/SARIF reports, baselines, and changed-lines gates are not
+part of v1. Standalone release archives and their `SHA256SUMS` manifest are
+available for users who do not use npm.
+
+For operators installing from a release archive, choose the archive whose name
+ends in `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, or
+`win32-x64`; verify its SHA-256 entry before extraction. The archive includes
+the executable, license, and operator documentation.

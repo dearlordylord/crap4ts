@@ -1,0 +1,297 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact semver tag to release (for example v1.0.0)
+        required: true
+        type: string
+      publish:
+        description: Upload verified assets and publish npm packages
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The five entries (linux-x64, linux-arm64, darwin-x64, darwin-arm64, and
+# win32-x64) are loaded from release-targets.json below; scripts use that same
+# file when staging and verifying package payloads.
+
+jobs:
+  target-matrix:
+    name: Read checked-in target map
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - id: targets
+        name: Export release targets
+        shell: bash
+        run: echo "matrix=$(node -e 'const targets=require(\"./release-targets.json\"); console.log(JSON.stringify(Object.entries(targets).map(([target, descriptor]) => ({target, ...descriptor}))));')" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: target-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.target-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Rust with fmt and clippy
+        uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
+        with:
+          targets: ${{ matrix.rustTarget }}
+          components: rustfmt, clippy
+      - name: Install Node.js for metadata checks
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.x'
+      - name: Build release binary
+        shell: bash
+        run: cargo build --locked --release -p crap4ts --target "${{ matrix.rustTarget }}"
+      - name: Native binary smoke
+        shell: bash
+        run: |
+          mkdir -p dist/binaries
+          binary="target/${{ matrix.rustTarget }}/release/${{ matrix.binaryName }}"
+          test -s "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
+          node scripts/check-versions.js --binary "$binary"
+          cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
+          sha256sum "$binary" | awk '{print $1 "  ${{ matrix.target }}"}' > "dist/binaries/${{ matrix.target }}.sha256"
+      - name: Native Windows generated-mode smoke (direct executable)
+        if: matrix.os == 'win32'
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path "target\${{ matrix.rustTarget }}\release\${{ matrix.binaryName }}").Path
+          $fixture = Join-Path $env:RUNNER_TEMP 'crap4ts-generated-smoke'
+          New-Item -ItemType Directory -Force $fixture | Out-Null
+          Set-Content (Join-Path $fixture 'coverage-template.json') '{"src/index.ts":{"path":"src/index.ts","fnMap":{"0":{"name":"smoke","decl":{"start":{"line":1,"column":7},"end":{"line":1,"column":37}},"loc":{"start":{"line":1,"column":7},"end":{"line":1,"column":37}}}},"f":{"0":1},"statementMap":{"0":{"start":{"line":1,"column":26},"end":{"line":1,"column":35}}},"s":{"0":1},"branchMap":{},"b":{}}}'
+          $config = '{"coverage_command":{"program":"node.exe","args":["-e","const fs=require(''fs''); const [marker,src,dst]=process.argv.slice(1); if(marker!==''hostile argument ; *'') process.exit(7); fs.copyFileSync(src,dst);","hostile argument ; *","coverage-template.json","coverage-final.json"]}}'
+          New-Item -ItemType Directory -Force (Join-Path $fixture 'src') | Out-Null
+          Set-Content (Join-Path $fixture 'src/index.ts') 'export function smoke() { return 1; }'
+          Set-Content (Join-Path $fixture '.crap4ts.json') $config
+          Push-Location $fixture
+          try {
+            $output = & $binary --coverage coverage-final.json src/index.ts --format json
+            $report = $output | ConvertFrom-Json
+            if ($report.version -ne 1 -or $report.rows.Count -lt 1 -or $report.rows[0].path -ne 'src/index.ts') { throw "native Windows generated-mode report assertion failed" }
+            if (-not (Test-Path (Join-Path $fixture 'coverage-final.json'))) { throw "generated artifact missing" }
+          } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw "native Windows generated-mode smoke failed" }
+      - name: Upload target binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: dist/binaries/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble and verify release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.x'
+          cache: npm
+      - name: Install locked npm dependencies
+        run: npm ci
+      - name: Download every target binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-binary-*
+          path: dist/binaries
+          merge-multiple: true
+      - name: Restore trusted executable mode after artifact transport
+        shell: bash
+        run: chmod 755 dist/binaries/crap4ts-linux-x64 dist/binaries/crap4ts-linux-arm64 dist/binaries/crap4ts-darwin-x64 dist/binaries/crap4ts-darwin-arm64
+      - name: Validate exact semver tag and versions
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          git fetch origin master --no-tags || true
+          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git fetch origin main --no-tags || true
+          base_ref=origin/master
+          git rev-parse --verify --quiet "$base_ref" >/dev/null || base_ref=origin/main
+          test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse "$base_ref^{commit}")"
+          npm run check:versions -- --tag "$RELEASE_TAG"
+      - name: Assemble standalone archives, npm packages, and checksums
+        run: node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
+      - name: Validate both JSON report contracts with the release binary
+        run: node scripts/check-schemas.js --binary dist/binaries/crap4ts-linux-x64
+      - name: Direct and packed npm mixed-workspace smoke
+        run: node scripts/npm-smoke.js --release-dir dist/release --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
+      - name: Fail closed before publication
+        run: |
+          mkdir -p dist/trusted
+          cp dist/release/BINARY-SHA256SUMS dist/trusted/BINARY-SHA256SUMS
+          node scripts/release-gate.js --release-dir dist/release --binary-manifest dist/trusted/BINARY-SHA256SUMS
+      - name: Upload immutable trusted binary manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crap4ts-trusted-binary-manifest
+          path: dist/trusted/BINARY-SHA256SUMS
+          if-no-files-found: error
+      - name: Upload verified release directory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crap4ts-release
+          path: dist/release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish verified assets
+    if: github.event_name == 'push' || inputs.publish == true
+    needs: assemble
+    runs-on: ubuntu-latest
+    environment: release-production
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.14.x'
+          always-auth: false
+      - name: Install trusted publishing npm CLI
+        shell: bash
+        run: |
+          npm install --global npm@11.5.1
+          node -e 'const [major,minor]=process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 14)) throw new Error("Node >=22.14 is required")'
+          test "$(npm --version)" = "11.5.1"
+          npm config set registry https://registry.npmjs.org --location=user
+          test -z "$(npm config get //registry.npmjs.org/:_authToken 2>/dev/null || true)"
+      - name: Download verified release directory
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: crap4ts-release
+          path: dist/release
+      - name: Download immutable trusted binary manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: crap4ts-trusted-binary-manifest
+          path: dist/trusted
+      - name: Re-run publication gate
+        run: node scripts/release-gate.js --release-dir dist/release --binary-manifest dist/trusted/BINARY-SHA256SUMS
+      - name: Create protected draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft,tagName >/tmp/existing-release.json 2>/dev/null; then
+            test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).isDraft")" = "true"
+            test "$(node -p "JSON.parse(require('fs').readFileSync('/tmp/existing-release.json')).tagName")" = "$RELEASE_TAG"
+            test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "crap4ts $RELEASE_TAG" --notes "Automated release; assets are gated below."
+          fi
+      - name: Reconcile GitHub assets (resumable, immutable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_json=$(gh release view "$RELEASE_TAG" --json assets)
+          node -e 'const {classify,assertSafe}=require("./scripts/publication-plan.js"); const fs=require("fs"); const remote=JSON.parse(process.argv[1]).assets.reduce((m,a)=>(m[a.name]=(a.digest||"").replace(/^sha256:/,""),m),{}); const files=process.argv.slice(2).map(path=>({name:require("path").basename(path),path})); const names=new Set(files.map(x=>x.name)); for(const name of Object.keys(remote)) if(!names.has(name)) throw new Error("unexpected stale release asset "+name); const plan=assertSafe(classify(files,remote)); fs.writeFileSync("/tmp/release-plan.json",JSON.stringify(plan));' "$remote_json" dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS
+          node -e 'for(const x of require("/tmp/release-plan.json")) if(x.action === "publish") console.log(x.name)' > /tmp/release-publish.txt
+          for file in dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS; do
+            name=$(basename "$file")
+            if grep -Fxq "$name" /tmp/release-publish.txt; then
+              gh release upload "$RELEASE_TAG" "$file"
+            else
+              echo "skip identical release asset $name"
+            fi
+          done
+      - name: Publish native npm packages before meta-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          for target in $(node -e 'process.stdout.write(Object.keys(require("./release-targets.json")).sort().join(" "))'); do
+            package="dist/release/npm/crap4ts-${target}-${version}.tgz"
+            test -f "$package"
+            name=$(node -p "require('./packages/crap4ts-' + '$target' + '/package.json').name")
+            err=$(mktemp)
+            if ! url=$(npm view "$name@$version" dist.tarball --json 2>"$err"); then
+              grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
+              url=null
+            fi
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              npm publish "$package" --access public --provenance
+            else
+              url=${url#\"}; url=${url%\"}
+              remote=$(mktemp)
+              curl --fail --location --silent --show-error "$url" -o "$remote"
+              cmp -s "$package" "$remote" || { echo "conflicting immutable npm package $name@$version" >&2; exit 1; }
+              echo "skip identical npm package $name@$version"
+            fi
+          done
+      - name: Publish npm meta-package last
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          package="dist/release/npm/crap4ts-${version}.tgz"
+          err=$(mktemp)
+          if ! url=$(npm view "crap4ts@$version" dist.tarball --json 2>"$err"); then
+            grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
+            url=null
+          fi
+          if [ -z "$url" ] || [ "$url" = "null" ]; then
+            npm publish "$package" --access public --provenance
+          else
+            url=${url#\"}; url=${url%\"}; remote=$(mktemp)
+            curl --fail --location --silent --show-error "$url" -o "$remote"
+            cmp -s "$package" "$remote" || { echo "conflicting immutable npm package crap4ts@$version" >&2; exit 1; }
+            echo "skip identical npm package crap4ts@$version"
+          fi
+      - name: Finalize release after all gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

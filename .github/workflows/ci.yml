@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Rust with fmt and clippy
+        uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
+        with:
+          components: rustfmt, clippy
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Rust clippy lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rust unit tests
+        run: cargo test -p crap4ts-core --lib --locked
+      - name: Coverage adapter contract tests
+        run: cargo test -p crap4ts-core --test lcov --locked
+      - name: CLI black-box tests
+        run: cargo test -p crap4ts --test cli --locked
+      - name: Complete Rust workspace tests
+        run: cargo test --workspace --locked
+
+  npm:
+    name: npm checks (Node ${{ matrix.node }} on ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20.x', '22.x', '24.x']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Node.js ${{ matrix.node }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
+      - name: Install locked npm dependencies
+        run: npm ci
+      - name: Check JavaScript syntax
+        run: npm run lint:npm
+      - name: Check versions and report schemas
+        run: npm run check:versions && npm run check:schemas
+      - name: Run packaged npm smoke and wrapper tests
+        run: npm test
