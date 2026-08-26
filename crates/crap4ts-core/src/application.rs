@@ -303,6 +303,7 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, Cor
         };
         for mut row in report.rows.drain(..) {
             let local_path = row.path.clone();
+            let suffix = validate_local_row_id(&name, &local_path, &row.id)?;
             let qualified_path = if local_root.is_empty() {
                 local_path.to_string()
             } else {
@@ -319,11 +320,7 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, Cor
                         name, qualified_path
                     ))
                 })?;
-            let suffix = row
-                .id
-                .strip_prefix(local_path.as_str())
-                .unwrap_or(row.id.as_str());
-            row.id = format!("{name}::{qualified_path}{suffix}");
+            row.id = format!("{name}::{qualified_path}::{suffix}");
             row.group = Some(name.to_string());
             rows.push(row);
         }
@@ -351,6 +348,33 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, Cor
         diagnostics,
         groups,
     })
+}
+
+/// Validate the local portion of a report-row identity before adding the
+/// package-group qualification.  The separator is part of the identity
+/// grammar: accepting only the path prefix would turn `src/file.tsx::f` into
+/// a seemingly valid `src/file.ts` identity.  The remaining function identity
+/// is intentionally opaque (names may contain punctuation), but it must be
+/// non-empty and printable.
+fn validate_local_row_id<'a>(
+    group: &GroupName,
+    path: &crate::domain::ProjectRelativePath,
+    id: &'a str,
+) -> Result<&'a str, CoreError> {
+    let prefix = format!("{}::", path.as_str());
+    let suffix = id.strip_prefix(&prefix).ok_or_else(|| {
+        CoreError::InvalidAggregateIdentity(format!(
+            "group '{}' row path '{}' has id '{}'; expected id prefix '{}'",
+            group, path, id, prefix
+        ))
+    })?;
+    if suffix.is_empty() || suffix.chars().any(char::is_control) {
+        return Err(CoreError::InvalidAggregateIdentity(format!(
+            "group '{}' row path '{}' has malformed id '{}'; expected a non-empty function identity after '{}'",
+            group, path, id, prefix
+        )));
+    }
+    Ok(suffix)
 }
 
 fn compare_diagnostics(left: &Diagnostic, right: &Diagnostic) -> Ordering {
@@ -542,6 +566,44 @@ mod tests {
         };
         assert!(matches!(
             aggregate_reports(vec![package("packages/core-a"), package("packages/core-b")]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn aggregate_reports_rejects_inconsistent_and_prefix_collision_row_ids() {
+        let package = |row: ReportRow| PackageReport {
+            name: GroupName::new("core").unwrap(),
+            root: GroupRoot::new("packages/core").unwrap(),
+            policy: ThresholdPolicy::new(8),
+            report_only: false,
+            report: crate::domain::Report {
+                version: crate::domain::REPORT_VERSION,
+                threshold: Some(8),
+                rows: vec![row],
+                diagnostics: Vec::new(),
+                groups: Vec::new(),
+            },
+        };
+
+        let mut wrong = row("src/f.ts", Some(1.0));
+        wrong.id = "wrong".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(wrong)]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+
+        let mut prefix_collision = row("src/f.ts", Some(1.0));
+        prefix_collision.id = "src/f.tsx::f".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(prefix_collision)]),
+            Err(CoreError::InvalidAggregateIdentity(_))
+        ));
+
+        let mut missing_function_identity = row("src/f.ts", Some(1.0));
+        missing_function_identity.id = "src/f.ts::".to_string();
+        assert!(matches!(
+            aggregate_reports(vec![package(missing_function_identity)]),
             Err(CoreError::InvalidAggregateIdentity(_))
         ));
     }
