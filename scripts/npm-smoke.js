@@ -71,6 +71,13 @@ function assertMixedReport(result, label) {
   return report;
 }
 
+function smokeConsumerDependencies(metaArchive, nativePackage, nativeArchive) {
+  return {
+    '@crap4ts/crap4ts': `file:${metaArchive}`,
+    [nativePackage]: `file:${nativeArchive}`,
+  };
+}
+
 function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
   const archives = fs.readdirSync(outputDir).filter((file) => file.endsWith('.tgz'));
   const nativeArchive = archives.find((file) => file.includes(targets[target].packageName.split('/').pop()));
@@ -87,10 +94,11 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
       {
         name: 'crap4ts-npm-smoke-consumer',
         private: true,
-        dependencies: {
-          crap4ts: `file:${path.join(outputDir, metaArchive)}`,
-          [nativePackage]: `file:${path.join(outputDir, nativeArchive)}`,
-        },
+        dependencies: smokeConsumerDependencies(
+          path.join(outputDir, metaArchive),
+          nativePackage,
+          path.join(outputDir, nativeArchive),
+        ),
       },
       null,
       2,
@@ -175,4 +183,5 @@ module.exports = {
   copyMixedFixture,
   main,
   parseArgs,
+  smokeConsumerDependencies,
 };

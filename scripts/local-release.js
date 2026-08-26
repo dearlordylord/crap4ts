@@ -76,13 +76,22 @@ function selectSuccessfulCi(runs, head) {
 
 function ensureTag(tag, head) {
   const remote = attempt('git', ['ls-remote', '--exit-code', '--tags', 'origin', `refs/tags/${tag}`]);
+  const local = attempt('git', ['rev-parse', '--verify', `refs/tags/${tag}`]);
   if (remote.status === 0) {
-    command('git', ['fetch', 'origin', `refs/tags/${tag}:refs/tags/${tag}`]);
-    assert.equal(command('git', ['rev-list', '-n', '1', tag]), head, `${tag} already points at another commit`);
+    const remoteRef = `refs/remotes/origin/release-tags/${tag}`;
+    command('git', ['fetch', '--force', 'origin', `refs/tags/${tag}:${remoteRef}`]);
+    assert.equal(command('git', ['rev-list', '-n', '1', remoteRef]), head, `remote ${tag} already points at another commit`);
+    if (local.status === 0) {
+      assert.equal(command('git', ['rev-list', '-n', '1', tag]), head, `local ${tag} already points at another commit`);
+    }
     return;
   }
   if (remote.status !== 2) throw new Error(`could not inspect remote tag ${tag}: ${remote.stderr.trim()}`);
-  command('git', ['tag', '-a', tag, '-m', `crap4ts ${tag}`]);
+  if (local.status === 0) {
+    assert.equal(command('git', ['rev-list', '-n', '1', tag]), head, `local ${tag} already points at another commit`);
+  } else {
+    command('git', ['tag', '-a', tag, '-m', `crap4ts ${tag}`]);
+  }
   command('git', ['push', 'origin', `refs/tags/${tag}`], { inherit: true });
 }
 
@@ -136,6 +145,7 @@ function reconcileRelease(tag, version, releaseDirectory, temporaryDirectory) {
     const name = path.basename(file);
     const remote = remoteByName.get(name);
     if (!remote) {
+      requireDraftForUpload(release.isDraft, name);
       command('gh', ['release', 'upload', tag, file], { inherit: true });
     } else if (remote.digest) {
       assert.equal(remote.digest.replace(/^sha256:/, ''), sha256(file), `existing release asset ${name} has different bytes`);
@@ -147,6 +157,10 @@ function reconcileRelease(tag, version, releaseDirectory, temporaryDirectory) {
     }
   }
   return release.isDraft;
+}
+
+function requireDraftForUpload(isDraft, assetName) {
+  assert.ok(isDraft, `GitHub release is already published and is missing ${assetName}`);
 }
 
 function publishNpmPackages(version, releaseDirectory, temporaryDirectory) {
@@ -214,6 +228,7 @@ module.exports = {
   packageTarballName,
   parseArgs,
   releaseAssetFiles,
+  requireDraftForUpload,
   selectReleaseRun,
   selectSuccessfulCi,
 };

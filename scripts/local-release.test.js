@@ -6,6 +6,7 @@ const targets = require('../release-targets.json');
 const {
   npmPublicationPlan,
   packageTarballName,
+  requireDraftForUpload,
   selectReleaseRun,
   selectSuccessfulCi,
 } = require('./local-release.js');
@@ -34,4 +35,9 @@ test('workflow selection ignores runs belonging to a different commit', () => {
   assert.equal(selectSuccessfulCi(runs, 'wanted').databaseId, 2);
   assert.equal(selectReleaseRun(runs, 'wanted').databaseId, 2);
   assert.equal(selectSuccessfulCi(runs, 'missing'), undefined);
+});
+
+test('missing assets cannot be added to an already-published GitHub release', () => {
+  assert.doesNotThrow(() => requireDraftForUpload(true, 'SHA256SUMS'));
+  assert.throws(() => requireDraftForUpload(false, 'SHA256SUMS'), /already published/);
 });

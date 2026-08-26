@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { npmBinInvocation, npmInvocation } = require('./npm-command.js');
 const { verifyMetaPack } = require('./pack-platform.js');
+const metaPackage = require('../packages/crap4ts/package.json');
+const { smokeConsumerDependencies } = require('./npm-smoke.js');
 
 test('Windows npm subprocesses use node plus npm_execpath instead of spawning npm.cmd', () => {
   assert.deepEqual(
@@ -41,4 +43,12 @@ test('Windows pack metadata may omit the launcher executable bit', () => {
     },
     metadata: { files: [{ path: 'bin/crap4ts.js', mode: 0o644 }] },
   }, 'win32'));
+});
+
+test('npm smoke public identity is the scoped meta-package identity', () => {
+  assert.equal(metaPackage.name, '@crap4ts/crap4ts');
+  assert.deepEqual(smokeConsumerDependencies('meta.tgz', '@crap4ts/linux-x64', 'native.tgz'), {
+    '@crap4ts/crap4ts': 'file:meta.tgz',
+    '@crap4ts/linux-x64': 'file:native.tgz',
+  });
 });
