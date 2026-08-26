@@ -117,7 +117,7 @@ function clearGeneratedFiles(directory, version) {
     ...targetNames.map((target) => versionedArchiveName(version, target)),
     'SHA256SUMS',
   '.smoke.ok',
-    'npm/SHA256SUMS',
+    'npm/NPM-SHA256SUMS',
   ];
   for (const name of names) {
     const file = path.join(directory, name);
@@ -320,7 +320,7 @@ function verifyRelease(options) {
     assertArchiveHasOnlyRegularFiles(archive, expectedArchiveEntries(target));
   }
   verifyNpmPackages(releaseDirectory, version);
-  const npmManifest = path.join(releaseDirectory, 'npm', 'SHA256SUMS');
+  const npmManifest = path.join(releaseDirectory, 'npm', 'NPM-SHA256SUMS');
   ensureRegularFile(npmManifest, 'npm SHA256SUMS');
   const expectedNpm = new Map(fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')).map((name) => [name, hashFile(path.join(releaseDirectory, 'npm', name))]));
   assert.deepEqual([...readManifest(npmManifest).keys()].sort(), [...expectedNpm.keys()].sort(), 'npm SHA256SUMS does not cover exactly the npm tarballs');
@@ -330,7 +330,7 @@ function verifyRelease(options) {
   for (const entry of fs.readdirSync(releaseDirectory)) {
     if (!allowedRoot.has(entry)) throw new Error(`unexpected release file ${entry}`);
   }
-  const allowedNpm = new Set([...fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')), 'SHA256SUMS']);
+  const allowedNpm = new Set([...fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')), 'NPM-SHA256SUMS']);
   for (const entry of fs.readdirSync(path.join(releaseDirectory, 'npm'))) {
     if (!allowedNpm.has(entry)) throw new Error(`unexpected npm release file ${entry}`);
   }
@@ -374,7 +374,7 @@ function assembleRelease(options) {
     const files = distributableFiles(releaseDirectory, version);
     verifyNpmPackages(releaseDirectory, version);
     writeManifest(files, path.join(releaseDirectory, 'SHA256SUMS'));
-    writeManifest(fs.readdirSync(packageOutput).filter((name) => name.endsWith('.tgz')).map((name) => path.join(packageOutput, name)), path.join(packageOutput, 'SHA256SUMS'));
+    writeManifest(fs.readdirSync(packageOutput).filter((name) => name.endsWith('.tgz')).map((name) => path.join(packageOutput, name)), path.join(packageOutput, 'NPM-SHA256SUMS'));
     // Remove staging before the strict recursive release check.
     fs.rmSync(stagingRoot, { recursive: true, force: true });
     // Verify before returning so assembly cannot hand a caller a partial set.
