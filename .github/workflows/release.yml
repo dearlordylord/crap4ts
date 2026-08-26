@@ -83,6 +83,7 @@ jobs:
           "$binary" --help >/dev/null
           node scripts/check-versions.js --binary "$binary"
           cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
+          sha256sum "$binary" | awk '{print $1 "  ${{ matrix.target }}"}' > "dist/binaries/${{ matrix.target }}.sha256"
       - name: Native Windows generated-mode smoke (direct executable)
         if: matrix.os == 'win32'
         shell: pwsh

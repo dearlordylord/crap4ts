@@ -116,6 +116,7 @@ function clearGeneratedFiles(directory, version) {
   const names = [
     ...targetNames.map((target) => versionedArchiveName(version, target)),
     'SHA256SUMS',
+    'BINARY-SHA256SUMS',
   '.smoke.ok',
     '.smoke-report.json',
     'npm/NPM-SHA256SUMS',
@@ -179,11 +180,15 @@ function archiveEntries(archive) {
     .sort();
 }
 
-function assertArchiveHasOnlyRegularFiles(archive, expected) {
+function assertArchiveHasOnlyRegularFiles(archive, expected, executableEntry) {
   const listing = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' });
   for (const line of listing.split(/\r?\n/).filter(Boolean)) {
     const type = line[0];
     if (type !== 'd' && type !== '-') throw new Error(`${archive} contains a symlink or special archive entry`);
+  }
+  if (executableEntry) {
+    const line = listing.split(/\r?\n/).find((entry) => entry.endsWith(` ${executableEntry}`));
+    if (!line || !/^-[rwx-]{10}\s/.test(line) || !/^-[rwx-]*x[rwx-]*\s/.test(line)) throw new Error(`${archive} executable payload is not mode-executable`);
   }
   assert.deepEqual(archiveEntries(archive), expected, `${archive} contains unexpected or missing entries`);
 }
@@ -217,6 +222,11 @@ function writeManifest(files, manifest) {
   const lines = files
     .map((file) => `${hashFile(file)}  ${path.relative(path.dirname(manifest), file).replaceAll('\\', '/')}`)
     .sort();
+  fs.writeFileSync(manifest, `${lines.join('\n')}\n`);
+}
+
+function writeBinaryManifest(binaryDirectory, manifest) {
+  const lines = targetNames.map((target) => `${hashFile(binaryForTarget(binaryDirectory, target))}  ${target}`).sort();
   fs.writeFileSync(manifest, `${lines.join('\n')}\n`);
 }
 
@@ -309,6 +319,9 @@ function verifyRelease(options) {
   ensureDirectory(releaseDirectory);
   const manifest = path.join(releaseDirectory, 'SHA256SUMS');
   ensureRegularFile(manifest, 'SHA256SUMS');
+  const binaryManifest = path.join(releaseDirectory, 'BINARY-SHA256SUMS');
+  ensureRegularFile(binaryManifest, 'BINARY-SHA256SUMS');
+  const trustedDigests = readManifest(binaryManifest);
   const files = distributableFiles(releaseDirectory, version);
   const actualArchives = actualStandaloneArchives(releaseDirectory);
   const expectedArchives = targetNames
@@ -318,7 +331,9 @@ function verifyRelease(options) {
   for (const target of targetNames) {
     const archive = path.join(releaseDirectory, versionedArchiveName(version, target));
     ensureRegularFile(archive, `${target} archive`);
-    assertArchiveHasOnlyRegularFiles(archive, expectedArchiveEntries(target));
+    assertArchiveHasOnlyRegularFiles(archive, expectedArchiveEntries(target), targets[target].os === 'win32' ? undefined : `crap4ts-${target}/${targets[target].binaryName}`);
+    const payload = execFileSync('tar', ['-xOf', archive, `crap4ts-${target}/${targets[target].binaryName}`], { maxBuffer: 256 * 1024 * 1024 });
+    assert.equal(hashFileBuffer(payload), trustedDigests.get(target), `${target} archive differs from trusted build digest`);
   }
   verifyNpmPackages(releaseDirectory, version);
   const npmManifest = path.join(releaseDirectory, 'npm', 'NPM-SHA256SUMS');
@@ -327,7 +342,7 @@ function verifyRelease(options) {
   assert.deepEqual([...readManifest(npmManifest).keys()].sort(), [...expectedNpm.keys()].sort(), 'npm SHA256SUMS does not cover exactly the npm tarballs');
   for (const [name, digest] of expectedNpm) assert.equal(readManifest(npmManifest).get(name), digest, `npm checksum mismatch for ${name}`);
 
-  const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'npm', '.smoke.ok', '.smoke-report.json']);
+  const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'BINARY-SHA256SUMS', 'npm', '.smoke.ok', '.smoke-report.json']);
   for (const entry of fs.readdirSync(releaseDirectory)) {
     if (!allowedRoot.has(entry)) throw new Error(`unexpected release file ${entry}`);
   }
@@ -337,7 +352,7 @@ function verifyRelease(options) {
   }
 
   const expectedManifest = new Map();
-  for (const file of files) {
+  for (const file of [...files, binaryManifest]) {
     expectedManifest.set(path.relative(releaseDirectory, file).replaceAll('\\', '/'), hashFile(file));
   }
   const actualManifest = readManifest(manifest);
@@ -374,7 +389,8 @@ function assembleRelease(options) {
     packTargets(sources, packageOutput, targetNames);
     const files = distributableFiles(releaseDirectory, version);
     verifyNpmPackages(releaseDirectory, version);
-    writeManifest(files, path.join(releaseDirectory, 'SHA256SUMS'));
+    writeBinaryManifest(binaryDirectory, path.join(releaseDirectory, 'BINARY-SHA256SUMS'));
+    writeManifest([...files, path.join(releaseDirectory, 'BINARY-SHA256SUMS')], path.join(releaseDirectory, 'SHA256SUMS'));
     writeManifest(fs.readdirSync(packageOutput).filter((name) => name.endsWith('.tgz')).map((name) => path.join(packageOutput, name)), path.join(packageOutput, 'NPM-SHA256SUMS'));
     // Remove staging before the strict recursive release check.
     fs.rmSync(stagingRoot, { recursive: true, force: true });
