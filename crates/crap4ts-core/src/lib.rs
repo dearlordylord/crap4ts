@@ -37,6 +37,30 @@ mod tests {
         })
     }
 
+    fn istanbul_position(source: &str, position: SourcePosition) -> serde_json::Value {
+        let line_start = source
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(offset, _)| offset + 1)
+            .chain(std::iter::once(0))
+            .filter(|offset| *offset <= position.offset)
+            .max()
+            .unwrap_or(0);
+        let line_prefix = &source[line_start..position.offset];
+        json!({
+            "line": position.line,
+            "column": line_prefix.encode_utf16().count()
+        })
+    }
+
+    fn istanbul_range(source: &str, range: SourceRange) -> serde_json::Value {
+        json!({
+            "start": istanbul_position(source, range.start),
+            "end": istanbul_position(source, range.end)
+        })
+    }
+
     #[test]
     fn complexity_does_not_include_nested_function_body() {
         let source = "function outer() { if (true) { return () => { if (false) return 1; }; } }";
@@ -88,7 +112,7 @@ mod tests {
             &[source_file],
             &serde_json::to_string(&coverage).unwrap(),
             8,
-            false,
+            true,
         )
         .unwrap();
         let parent = report
@@ -103,6 +127,47 @@ mod tests {
             .unwrap();
         assert_eq!(parent.coverage, Coverage::measured(0, 1).unwrap());
         assert_eq!(child.coverage, Coverage::measured(1, 1).unwrap());
+    }
+
+    #[test]
+    fn separator_only_same_line_fn_map_entry_stays_unknown() {
+        let source = "const first = () => 1; const second = () => 2;\n";
+        let path = ProjectRelativePath::new("separator.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let first = units.iter().find(|unit| unit.name == "first").unwrap();
+        let coverage = json!({
+            "separator.ts": {
+                "fnMap": {
+                    "0": {
+                        "name": "first",
+                        "loc": {
+                            "start": position(first.range.end.line, first.range.end.column),
+                            "end": {"line": 1, "column": null}
+                        }
+                    }
+                },
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        let first_row = report.rows.iter().find(|row| row.id == first.id).unwrap();
+        assert!(matches!(first_row.coverage, Coverage::Unknown { .. }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::CoverageAttribution
+                && diagnostic
+                    .message
+                    .contains("unmatched Istanbul function-map entry")
+        }));
     }
 
     #[test]
@@ -134,6 +199,546 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, CoreError::CoverageAttribution(_)));
+    }
+
+    #[test]
+    fn unicode_before_function_uses_istanbul_utf16_columns() {
+        let source = "const emoji = '😀'; function greet() { return emoji; }\n";
+        let path = ProjectRelativePath::new("unicode.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let unit = super::source::analyze_source(&path, source)
+            .unwrap()
+            .into_iter()
+            .find(|unit| unit.name == "greet")
+            .unwrap();
+        let coverage = json!({
+            "unicode.ts": {
+                "statementMap": {
+                    "0": istanbul_range(source, unit.body_range)
+                },
+                "fnMap": {
+                    "0": {
+                        "name": "greet",
+                        "loc": istanbul_range(source, unit.body_range)
+                    }
+                },
+                "s": {"0": 1},
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+        assert_eq!(row.range, unit.range);
+        assert_eq!(row.coverage, Coverage::measured(1, 1).unwrap());
+        assert_eq!(row.crap, Some(1.0));
+    }
+
+    #[test]
+    fn unmatched_nested_function_is_a_barrier_for_parent_statements() {
+        let source =
+            "function outer() {\n  return 1;\n  const child = () => {\n    return 2;\n  };\n}\n";
+        let path = ProjectRelativePath::new("nested.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let parent = units.iter().find(|unit| unit.name == "outer").unwrap();
+        let child = units.iter().find(|unit| unit.name == "child").unwrap();
+        let coverage = json!({
+            "nested.ts": {
+                "statementMap": {
+                    "parent": {"start": position(2, 2), "end": position(2, 10)},
+                    "child": {"start": position(4, 4), "end": position(4, 12)}
+                },
+                "fnMap": {
+                    "0": {"name": "outer", "loc": range(parent.body_range)}
+                },
+                "s": {"parent": 1, "child": 1},
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        let parent_row = report.rows.iter().find(|row| row.id == parent.id).unwrap();
+        let child_row = report.rows.iter().find(|row| row.id == child.id).unwrap();
+        assert_eq!(parent_row.coverage, Coverage::measured(1, 1).unwrap());
+        assert!(matches!(child_row.coverage, Coverage::Unknown { .. }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::CoverageAttribution
+                && diagnostic
+                    .message
+                    .contains("inside an unmatched source function")
+        }));
+    }
+
+    #[test]
+    fn unmatched_parent_does_not_block_a_matched_nested_function() {
+        let source = "function outer() {\n  const child = () => {\n    return 2;\n  };\n}\n";
+        let path = ProjectRelativePath::new("nested-parent.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let parent = units.iter().find(|unit| unit.name == "outer").unwrap();
+        let child = units.iter().find(|unit| unit.name == "child").unwrap();
+        let coverage = json!({
+            "nested-parent.ts": {
+                "statementMap": {
+                    "child": {"start": {"line": 3, "column": 4}, "end": {"line": 3, "column": 12}}
+                },
+                "fnMap": {
+                    "0": {"name": "child", "loc": range(child.body_range)}
+                },
+                "s": {"child": 1},
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        let parent_row = report.rows.iter().find(|row| row.id == parent.id).unwrap();
+        let child_row = report.rows.iter().find(|row| row.id == child.id).unwrap();
+        assert!(matches!(parent_row.coverage, Coverage::Unknown { .. }));
+        assert_eq!(child_row.coverage, Coverage::measured(1, 1).unwrap());
+    }
+
+    #[test]
+    fn same_named_functions_in_different_files_keep_file_scoped_coverage() {
+        let first_path = ProjectRelativePath::new("one.ts").unwrap();
+        let second_path = ProjectRelativePath::new("two.ts").unwrap();
+        let first_source = "function same() { return 1; }\n";
+        let second_source = "function same() { return 2; }\n";
+        let first = SourceFile {
+            path: first_path.clone(),
+            source: first_source.to_string(),
+        };
+        let second = SourceFile {
+            path: second_path.clone(),
+            source: second_source.to_string(),
+        };
+        let first_unit = super::source::analyze_source(&first_path, first_source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let second_unit = super::source::analyze_source(&second_path, second_source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let coverage = json!({
+            "one.ts": {
+                "statementMap": {"0": range(first_unit.body_range)},
+                "fnMap": {"0": {"name": "same", "loc": range(first_unit.body_range)}},
+                "s": {"0": 0},
+                "f": {"0": 0}
+            },
+            "two.ts": {
+                "statementMap": {"0": range(second_unit.body_range)},
+                "fnMap": {"0": {"name": "same", "loc": range(second_unit.body_range)}},
+                "s": {"0": 1},
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[first, second],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            report
+                .rows
+                .iter()
+                .find(|row| row.id == first_unit.id)
+                .unwrap()
+                .coverage,
+            Coverage::measured(0, 1).unwrap()
+        );
+        assert_eq!(
+            report
+                .rows
+                .iter()
+                .find(|row| row.id == second_unit.id)
+                .unwrap()
+                .coverage,
+            Coverage::measured(1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn unmatched_entries_are_structured_in_json_and_text_reports() {
+        let path = ProjectRelativePath::new("diagnostics.ts").unwrap();
+        let source = "function known() { return 1; }\n";
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let unit = super::source::analyze_source(&path, source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let coverage = json!({
+            "diagnostics.ts": {
+                "fnMap": {
+                    "0": {"name": "stale", "loc": {"start": {"line": 1, "column": 0}, "end": {"line": 1, "column": 1}}}
+                },
+                "f": {"0": 0}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::CoverageAttribution
+                && diagnostic
+                    .message
+                    .contains("unmatched Istanbul function-map entry")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::MissingEvidence
+                && diagnostic.message.contains(&unit.id)
+        }));
+        let text = render_text(&report);
+        assert!(text.contains("diagnostic [coverage_attribution]"));
+        let json: serde_json::Value = serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+        assert!(json["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| { diagnostic["category"] == "coverage_attribution" }));
+    }
+
+    #[test]
+    fn null_istanbul_end_columns_normalize_to_line_end_without_invalid_offsets() {
+        let source = "function nullable() { return 1; }\n";
+        let path = ProjectRelativePath::new("nullable.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let coverage = json!({
+            "nullable.ts": {
+                "fnMap": {
+                    "0": {"name": "nullable", "loc": {
+                        "start": {"line": 1, "column": 20},
+                        "end": {"line": 1, "column": null}
+                    }}
+                },
+                "statementMap": {
+                    "0": {"start": {"line": 1, "column": 22}, "end": {"line": 1, "column": null}}
+                },
+                "f": {"0": 1},
+                "s": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.name == "nullable")
+            .unwrap();
+        assert_eq!(row.coverage, Coverage::measured(1, 1).unwrap());
+        assert!(row.range.start.offset < row.range.end.offset);
+    }
+
+    #[test]
+    fn crossing_sibling_ranges_remain_unmatched_instead_of_shortest_guessing() {
+        let source = "function first() { return 1; } function second() { return 2; }\n";
+        let path = ProjectRelativePath::new("siblings.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let coverage = json!({
+            "siblings.ts": {
+                "fnMap": {
+                    "0": {"name": "first", "loc": {
+                        "start": {"line": 1, "column": 21},
+                        "end": {"line": 1, "column": 53}
+                    }}
+                },
+                "statementMap": {
+                    "0": {"start": {"line": 1, "column": 21}, "end": {"line": 1, "column": 53}}
+                },
+                "f": {"0": 1},
+                "s": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        assert!(report
+            .rows
+            .iter()
+            .all(|row| matches!(row.coverage, Coverage::Unknown { .. })));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::CoverageAttribution
+                && diagnostic
+                    .message
+                    .contains("unmatched Istanbul function-map entry")
+        }));
+    }
+
+    #[test]
+    fn anonymous_istanbul_function_names_match_unique_arrow_locations() {
+        let source = "const callback = () => 1;\n";
+        let path = ProjectRelativePath::new("anonymous.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let unit = super::source::analyze_source(&path, source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let coverage = json!({
+            "anonymous.ts": {
+                "fnMap": {
+                    "0": {"name": "(anonymous_0)", "loc": {
+                        "start": {"line": 1, "column": 16},
+                        "end": {"line": 1, "column": 24}
+                    }}
+                },
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+        assert_eq!(row.coverage, Coverage::measured(1, 1).unwrap());
+    }
+
+    #[test]
+    fn nested_anonymous_vitest_envelopes_use_decl_to_select_the_child() {
+        let source = "const smellCounter = (values: number[]) => {\n  return values.map((value) => {\n    return value + 1;\n  });\n};\n";
+        let path = ProjectRelativePath::new("smell-counter.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        assert_eq!(units.len(), 2);
+        let parent = units
+            .iter()
+            .find(|unit| unit.name == "smellCounter")
+            .unwrap();
+        let child = units.iter().find(|unit| unit.id != parent.id).unwrap();
+        let broad_end = |line| json!({ "line": line, "column": null });
+        let coverage = json!({
+            "smell-counter.ts": {
+                "fnMap": {
+                    "0": {
+                        "name": "(anonymous_0)",
+                        "loc": {"start": istanbul_position(source, parent.range.start), "end": broad_end(5)},
+                        "decl": istanbul_range(source, parent.range)
+                    },
+                    "1": {
+                        "name": "(anonymous_1)",
+                        "loc": {"start": istanbul_position(source, child.range.start), "end": broad_end(4)},
+                        "decl": istanbul_range(source, child.range)
+                    }
+                },
+                "f": {"0": 0, "1": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        let parent_row = report.rows.iter().find(|row| row.id == parent.id).unwrap();
+        let child_row = report.rows.iter().find(|row| row.id == child.id).unwrap();
+        assert_eq!(parent_row.coverage, Coverage::measured(0, 1).unwrap());
+        assert_eq!(child_row.coverage, Coverage::measured(1, 1).unwrap());
+    }
+
+    #[test]
+    fn nested_anonymous_envelope_without_decl_fails_closed() {
+        let source = "const smellCounter = (values: number[]) => {\n  return values.map((value) => {\n    return value + 1;\n  });\n};\n";
+        let path = ProjectRelativePath::new("smell-counter-ambiguous.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let child = units
+            .iter()
+            .max_by_key(|unit| unit.range.start.offset)
+            .unwrap();
+        let coverage = json!({
+            "smell-counter-ambiguous.ts": {
+                "fnMap": {
+                    "0": {
+                        "name": "(anonymous_1)",
+                        "loc": {"start": istanbul_position(source, child.range.start), "end": {"line": 4, "column": null}}
+                    }
+                },
+                "f": {"0": 1}
+            }
+        });
+        let error = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CoreError::CoverageAttribution(message) if message.contains("anonymous"))
+        );
+    }
+
+    #[test]
+    fn anonymous_constructor_decl_prefix_beats_nested_arrow_candidate() {
+        let source = "class Service {\n  constructor() {\n    const nested = () => 1;\n    this.value = nested;\n  }\n}\n";
+        let path = ProjectRelativePath::new("constructor.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let constructor = units
+            .iter()
+            .find(|unit| unit.kind == FunctionKind::Constructor)
+            .unwrap();
+        let nested = units.iter().find(|unit| unit.id != constructor.id).unwrap();
+        let coverage = json!({
+            "constructor.ts": {
+                "fnMap": {
+                    "0": {
+                        "name": "(anonymous_0)",
+                        "loc": {"start": istanbul_position(source, nested.range.start), "end": {"line": 3, "column": null}},
+                        "decl": {"start": position(2, 0), "end": position(2, 13)}
+                    }
+                },
+                "f": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        let constructor_row = report
+            .rows
+            .iter()
+            .find(|row| row.id == constructor.id)
+            .unwrap();
+        let nested_row = report.rows.iter().find(|row| row.id == nested.id).unwrap();
+        assert_eq!(constructor_row.coverage, Coverage::measured(1, 1).unwrap());
+        assert!(matches!(nested_row.coverage, Coverage::Unknown { .. }));
+    }
+
+    #[test]
+    fn real_short_circuit_function_fixture_keeps_statement_coverage_local() {
+        let source = "function isShortCircuit(value: boolean) { return value && value; }\n";
+        let path = ProjectRelativePath::new("is-short-circuit.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let unit = super::source::analyze_source(&path, source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let coverage = json!({
+            "is-short-circuit.ts": {
+                "fnMap": {"0": {"name": "isShortCircuit", "loc": range(unit.body_range)}},
+                "statementMap": {"0": range(unit.body_range)},
+                "f": {"0": 1},
+                "s": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+        assert_eq!(row.complexity.get(), 2);
+        assert_eq!(row.coverage, Coverage::measured(1, 1).unwrap());
+    }
+
+    #[test]
+    fn statement_ownership_requires_the_complete_range_inside_a_body() {
+        let source = "function only() {\n  return 1;\n}\nconst outside = 0;\n";
+        let path = ProjectRelativePath::new("statement-range.ts").unwrap();
+        let source_file = SourceFile {
+            path: path.clone(),
+            source: source.to_string(),
+        };
+        let unit = super::source::analyze_source(&path, source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let coverage = json!({
+            "statement-range.ts": {
+                "fnMap": {"0": {"name": "only", "loc": range(unit.body_range)}},
+                "statementMap": {"0": {
+                    "start": {"line": 2, "column": 2},
+                    "end": {"line": 4, "column": 1}
+                }},
+                "s": {"0": 1}
+            }
+        });
+        let report = analyze(
+            &[source_file],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            true,
+        )
+        .unwrap();
+        let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+        assert!(matches!(row.coverage, Coverage::Unknown { .. }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.category == DiagnosticCategory::CoverageAttribution
+                && diagnostic.message.contains("no compatible source function")
+        }));
     }
 
     #[test]

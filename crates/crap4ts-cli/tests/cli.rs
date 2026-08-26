@@ -266,6 +266,69 @@ fn malformed_path_field_fails_even_when_the_key_is_valid() {
 }
 
 #[test]
+fn report_only_emits_structured_unmatched_diagnostics_in_text_and_json() {
+    let fixture = Fixture::new();
+    let coverage_path = fixture.root.join("coverage-final.json");
+    let source_key = fixture
+        .root
+        .join("src/fixture.ts")
+        .to_string_lossy()
+        .to_string();
+    let mut coverage: Value =
+        serde_json::from_slice(&fs::read(&coverage_path).unwrap()).expect("fixture coverage");
+    coverage[&source_key]["fnMap"]["0"]["name"] = json!("stale");
+    coverage[&source_key]["fnMap"]["0"]["loc"] = json!({
+        "start": {"line": 1, "column": 0},
+        "end": {"line": 1, "column": 1}
+    });
+    fs::write(&coverage_path, serde_json::to_vec(&coverage).unwrap()).unwrap();
+
+    let text = run(&fixture, &["--report-only"]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("diagnostic [coverage_attribution]"));
+
+    let json_output = run(&fixture, &["--format", "json", "--report-only"]);
+    assert_eq!(json_output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&json_output.stdout).expect("valid JSON report");
+    assert!(report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| { diagnostic["category"] == "coverage_attribution" }));
+}
+
+#[test]
+fn json_errors_emit_structured_ambiguity_diagnostics_on_stderr() {
+    let fixture = Fixture::new();
+    let coverage_path = fixture.root.join("coverage-final.json");
+    let source_key = fixture
+        .root
+        .join("src/fixture.ts")
+        .to_string_lossy()
+        .to_string();
+    let mut coverage: Value =
+        serde_json::from_slice(&fs::read(&coverage_path).unwrap()).expect("fixture coverage");
+    let duplicate = coverage[&source_key]["fnMap"]["0"].clone();
+    coverage[&source_key]["fnMap"]["1"] = duplicate;
+    coverage[&source_key]["f"]["1"] = json!(0);
+    fs::write(&coverage_path, serde_json::to_vec(&coverage).unwrap()).unwrap();
+
+    let output = run(&fixture, &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let diagnostics: Value =
+        serde_json::from_slice(&output.stderr).expect("structured JSON diagnostics");
+    assert_eq!(
+        diagnostics["diagnostics"][0]["category"],
+        "coverage_attribution"
+    );
+    assert!(diagnostics["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("coverage attribution failed"));
+}
+
+#[test]
 fn built_in_test_file_exclusion_keeps_reportable_sources_only() {
     let fixture = Fixture::new();
     fs::write(

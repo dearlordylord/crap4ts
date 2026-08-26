@@ -55,7 +55,7 @@ pub fn analyze_with_root(
         )?);
         coverage_adapter.validate_for_source(&source_file.path, &source_file.source)?;
     }
-    coverage_adapter.validate_attribution(&units, sources)?;
+    let mut diagnostics = coverage_adapter.validate_attribution(&units, sources)?;
 
     let mut rows = Vec::with_capacity(units.len());
     for unit in &units {
@@ -65,9 +65,13 @@ pub fn analyze_with_root(
             .map_or("", |source| source.source.as_str());
         let measured = coverage_adapter.coverage_for(&unit.path, unit, source, &units)?;
         let coverage = measured.unwrap_or_else(|| {
-            Coverage::unknown("no matching Istanbul function or statement evidence")
+            Coverage::unknown("no matching coverage function or statement evidence")
         });
         if let Coverage::Unknown { reason } = &coverage {
+            diagnostics.push(Diagnostic::new(
+                DiagnosticCategory::MissingEvidence,
+                format!("missing coverage evidence for '{}': {reason}", unit.id),
+            ));
             if !allow_unknown {
                 return Err(CoreError::MissingEvidence {
                     path: unit.path.to_string(),
@@ -92,7 +96,6 @@ pub fn analyze_with_root(
     }
 
     rows.sort_by(compare_rows);
-    let mut diagnostics = Vec::new();
     if rows
         .iter()
         .any(|row| row.crap.is_some_and(|score| score > threshold as f64))
@@ -102,6 +105,11 @@ pub fn analyze_with_root(
             format!("one or more CRAP scores exceed the threshold of {threshold}"),
         ));
     }
+    diagnostics.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then_with(|| left.message.cmp(&right.message))
+    });
     Ok(Report {
         version: crate::domain::REPORT_VERSION,
         threshold,

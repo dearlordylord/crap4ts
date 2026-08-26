@@ -42,5 +42,12 @@ pub fn render_text(report: &Report) -> String {
     if report.rows.is_empty() {
         output.push_str("(no executable TypeScript functions)\n");
     }
+    for diagnostic in &report.diagnostics {
+        output.push_str(&format!(
+            "diagnostic [{}]: {}\n",
+            diagnostic.category.as_label(),
+            diagnostic.message
+        ));
+    }
     output
 }
