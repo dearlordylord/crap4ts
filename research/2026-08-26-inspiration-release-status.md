@@ -96,3 +96,12 @@ The appropriate bookkeeping is therefore to reopen #11 (or create a focused
 release-blocker issue linked to it) until a real release exists. Shipping is
 justified by the project's stated acceptance criteria, not merely because six
 other implementations shipped.
+
+### Resolution after review
+
+The implementation now uses the organization-owned `@crap4ts/crap4ts`
+meta-package alongside the five `@crap4ts/*` native packages. The two Windows
+failures have regression coverage, and `pnpm local-release` implements the
+authenticated first-publication bootstrap described above. The remaining
+external boundary is a maintainer's npm login and organization publish access;
+the command itself requires green hosted CI before it will create `v1.0.0`.

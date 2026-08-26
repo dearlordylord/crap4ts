@@ -492,7 +492,9 @@ mod tests {
     #[test]
     fn missing_target_is_accepted_only_under_existing_parent() {
         let root = fixture();
-        let target = root.join("nested/coverage.json");
+        let target = fs::canonicalize(&root)
+            .unwrap()
+            .join("nested/coverage.json");
         assert_eq!(
             validate_artifact_path(&root, Path::new("nested/coverage.json")).unwrap(),
             target

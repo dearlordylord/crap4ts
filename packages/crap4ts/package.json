@@ -1,5 +1,5 @@
 {
-  "name": "crap4ts",
+  "name": "@crap4ts/crap4ts",
   "version": "1.0.0",
   "description": "A thin npm launcher for the crap4ts TypeScript CRAP quality gate",
   "license": "MIT",

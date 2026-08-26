@@ -74,7 +74,7 @@ function assertMixedReport(result, label) {
 function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
   const archives = fs.readdirSync(outputDir).filter((file) => file.endsWith('.tgz'));
   const nativeArchive = archives.find((file) => file.includes(targets[target].packageName.split('/').pop()));
-  const metaArchive = archives.find((file) => file.startsWith('crap4ts-') && !file.includes(target));
+  const metaArchive = archives.find((file) => file.startsWith('crap4ts-crap4ts-'));
   assert.ok(nativeArchive, `native archive for ${target} missing`);
   assert.ok(metaArchive, 'meta-package archive missing');
 

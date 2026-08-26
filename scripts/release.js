@@ -26,7 +26,8 @@ for (const target of REQUIRED_TARGETS) {
   assert.equal(descriptor.archiveExtension, 'tar.gz', `${target} archive extension must be tar.gz`);
   if (target.startsWith('linux-')) assert.equal(descriptor.libc, 'glibc', `${target} must declare glibc libc`);
 }
-const packageNames = [...targetNames.map((target) => targets[target].packageName), 'crap4ts'];
+const META_PACKAGE_NAME = '@crap4ts/crap4ts';
+const packageNames = [...targetNames.map((target) => targets[target].packageName), META_PACKAGE_NAME];
 
 function usage() {
   return [
@@ -325,8 +326,8 @@ function verifyNpmPackages(directory, version) {
     const npmBytes = execFileSync('tar', ['-xOf', item.archive, `package/${descriptor.binaryPath}`], tarOptions);
     assert.equal(hashFileBuffer(npmBytes), hashFileBuffer(standaloneBytes), `${target} standalone and npm binary payload differ`);
   }
-  const meta = byName.get('crap4ts');
-  assert.ok(meta, 'missing crap4ts meta-package archive');
+  const meta = byName.get(META_PACKAGE_NAME);
+  assert.ok(meta, `missing ${META_PACKAGE_NAME} meta-package archive`);
   assertPackageArchive(meta.archive, ['package/bin/crap4ts.js', 'package/package.json', 'package/README.md'], 'package/bin/crap4ts.js');
   assert.ok(meta.entries.includes('package/bin/crap4ts.js'), 'meta-package archive is missing executable launcher');
   assert.deepEqual(

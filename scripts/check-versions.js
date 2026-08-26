@@ -82,16 +82,21 @@ function lockfileRoot() {
   return lock.packages?.[''] || {};
 }
 
-function cargoPackageVersions() {
-  const lock = fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8');
+function cargoPackageVersionsFromLock(lock) {
   const expectedPackages = new Set(['crap4ts', 'crap4ts-core']);
   const versions = new Map();
-  for (const block of lock.split(/\n\[\[package\]\]\n/).slice(1)) {
+  for (const block of lock.split(/^\[\[package\]\]\r?$/m).slice(1)) {
     const name = block.match(/^name\s*=\s*"([^"]+)"\s*$/m)?.[1];
     const version = block.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1];
     if (name && version && expectedPackages.has(name)) versions.set(name, version);
   }
   return versions;
+}
+
+function cargoPackageVersions() {
+  return cargoPackageVersionsFromLock(
+    fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8'),
+  );
 }
 
 function reportSchemaVersions() {
@@ -157,7 +162,7 @@ function main(options = {}) {
       mismatches.push(`${path.relative(root, file)} is ${metadata.version || '<missing>'}`);
     }
   }
-  const wrapper = metadataByName.get('crap4ts');
+  const wrapper = metadataByName.get('@crap4ts/crap4ts');
   for (const [name, version] of Object.entries(wrapper?.optionalDependencies || {})) {
     if (version !== rustVersion) {
       mismatches.push(`crap4ts optional dependency ${name} is ${version}`);
@@ -249,6 +254,7 @@ if (require.main === module) {
 module.exports = {
   checkBinaryVersion,
   cargoPackageVersions,
+  cargoPackageVersionsFromLock,
   lockfileVersions,
   lockfileRoot,
   main,

@@ -179,7 +179,7 @@ jobs:
 
   publish:
     name: Publish verified assets
-    if: github.event_name == 'push' || inputs.publish == true
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
     needs: assemble
     runs-on: ubuntu-latest
     environment: release-production
@@ -276,9 +276,9 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
-          package="dist/release/npm/crap4ts-${version}.tgz"
+          package="dist/release/npm/crap4ts-crap4ts-${version}.tgz"
           err=$(mktemp)
-          if ! url=$(npm view "crap4ts@$version" dist.tarball --json 2>"$err"); then
+          if ! url=$(npm view "@crap4ts/crap4ts@$version" dist.tarball --json 2>"$err"); then
             grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
             url=null
           fi
@@ -287,8 +287,8 @@ jobs:
           else
             url=${url#\"}; url=${url%\"}; remote=$(mktemp)
             curl --fail --location --silent --show-error "$url" -o "$remote"
-            cmp -s "$package" "$remote" || { echo "conflicting immutable npm package crap4ts@$version" >&2; exit 1; }
-            echo "skip identical npm package crap4ts@$version"
+            cmp -s "$package" "$remote" || { echo "conflicting immutable npm package @crap4ts/crap4ts@$version" >&2; exit 1; }
+            echo "skip identical npm package @crap4ts/crap4ts@$version"
           fi
       - name: Finalize release after all gates
         env:

@@ -24,11 +24,6 @@ decision.
   and conclusion](./research/2026-08-25-alternative-implementations.md)
 - [Research index](./research/README.md)
 
-## Status
-
-The implementation specification is tracked in
-[issue #1](https://github.com/dearlordylord/crap4ts/issues/1).
-
 ## Development and CLI
 
 The standalone Rust CLI is the first implementation slice. A Rust 1.94 (or
@@ -213,7 +208,7 @@ guesses are rejected.
 The npm distribution is a thin launcher around the same standalone binary:
 
 ```sh
-npm install --save-dev crap4ts
+npm install --save-dev @crap4ts/crap4ts
 npx crap4ts --help
 ```
 
@@ -243,8 +238,7 @@ The staging command validates the target's declared `bin` path, and the pack
 command fails unless the resulting tarball contains an executable payload. The
 clean host archive smoke is run by `npm test`; it builds release mode, packs
 the meta and host package, installs them in a temporary consumer, and invokes
-help plus fixture analysis. Issue #11 owns the cross-target release matrix and
-checksum/publishing automation.
+help plus fixture analysis.
 
 #### Direct release archives and checksums
 
@@ -337,8 +331,19 @@ release workflow; the gate compares it with the in-release copy and every
 standalone/npm binary payload.
 
 The gate refuses a release with any missing target archive, checksum, npm
-package, required binary payload, or smoke marker. Publication is a separate
-workflow action and is never performed by these local commands.
+package, required binary payload, or smoke marker. A maintainer releases from a
+clean, pushed, green `master` checkout after authenticating `gh` and `npm`:
+
+```sh
+pnpm local-release
+```
+
+That command creates the version tag, waits for GitHub Actions to cross-build
+all five targets, downloads and re-verifies the immutable artifacts, publishes
+the five native packages before `@crap4ts/crap4ts`, and finalizes the GitHub
+release last. It is safe to retry: identical remote bytes are skipped and
+conflicting bytes stop the release. `pnpm local-release --check` performs only
+the read-only preflight.
 
 ## License
 

@@ -149,8 +149,8 @@ function verifyNativePack(result, target, source) {
 }
 
 function verifyMetaPack(result) {
-  if (result.packageJson.name !== 'crap4ts') {
-    throw new Error(`expected crap4ts meta-package, received ${result.packageJson.name}`);
+  if (result.packageJson.name !== '@crap4ts/crap4ts') {
+    throw new Error(`expected @crap4ts/crap4ts meta-package, received ${result.packageJson.name}`);
   }
   const launcher = result.metadata.files.find((entry) => entry.path === 'bin/crap4ts.js');
   if (!launcher || (launcher.mode & 0o111) === 0) {

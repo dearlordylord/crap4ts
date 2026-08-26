@@ -1,6 +1,6 @@
 # crap4ts
 
-`crap4ts` is the npm distribution of the standalone Rust CRAP quality-gate
+`@crap4ts/crap4ts` is the npm distribution of the standalone Rust CRAP quality-gate
 CLI. The package contains only a launcher. At install time npm selects one
 matching optional platform package; the launcher passes arguments, standard
 streams, signals, and the child exit status through to that native binary.
@@ -17,7 +17,7 @@ The supported Node.js range is `>=20.19.0 <25`, covering the maintained Node
 20, 22, and 24 LTS lines. Install with:
 
 ```sh
-npm install --save-dev crap4ts
+npm install --save-dev @crap4ts/crap4ts
 npx crap4ts --help
 ```
 
