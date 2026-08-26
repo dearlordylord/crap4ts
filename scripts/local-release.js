@@ -65,9 +65,13 @@ function assertCleanPushedMaster() {
 }
 
 function assertGreenCi(head) {
-  const raw = command('gh', ['run', 'list', '--workflow', 'CI', '--commit', head, '--limit', '20', '--json', 'databaseId,status,conclusion']);
+  const raw = command('gh', ['run', 'list', '--workflow', 'CI', '--branch', 'master', '--limit', '20', '--json', 'databaseId,headSha,status,conclusion']);
   const runs = JSON.parse(raw);
-  assert.ok(runs.some((run) => run.status === 'completed' && run.conclusion === 'success'), `CI has no successful completed run for ${head}`);
+  assert.ok(selectSuccessfulCi(runs, head), `CI has no successful completed run for ${head}`);
+}
+
+function selectSuccessfulCi(runs, head) {
+  return runs.find((run) => run.headSha === head && run.status === 'completed' && run.conclusion === 'success');
 }
 
 function ensureTag(tag, head) {
@@ -84,12 +88,16 @@ function ensureTag(tag, head) {
 
 function findReleaseRun(head) {
   for (let index = 0; index < 40; index += 1) {
-    const runs = JSON.parse(command('gh', ['run', 'list', '--workflow', 'Release', '--commit', head, '--limit', '20', '--json', 'databaseId,event']));
-    const run = runs.find((item) => item.event === 'push');
+    const runs = JSON.parse(command('gh', ['run', 'list', '--workflow', 'Release', '--limit', '20', '--json', 'databaseId,event,headSha']));
+    const run = selectReleaseRun(runs, head);
     if (run) return String(run.databaseId);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
   }
   throw new Error(`Release workflow did not start for ${head}`);
+}
+
+function selectReleaseRun(runs, head) {
+  return runs.find((run) => run.headSha === head && run.event === 'push');
 }
 
 function downloadArtifacts(runId, temporaryDirectory) {
@@ -200,4 +208,12 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, npmPublicationPlan, packageTarballName, parseArgs, releaseAssetFiles };
+module.exports = {
+  main,
+  npmPublicationPlan,
+  packageTarballName,
+  parseArgs,
+  releaseAssetFiles,
+  selectReleaseRun,
+  selectSuccessfulCi,
+};

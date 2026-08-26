@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { targets, stage, binaryForDirectory } = require('./stage-platform.js');
+const { npmInvocation } = require('./npm-command.js');
 
 const root = path.resolve(__dirname, '..');
 
@@ -79,9 +80,10 @@ function removeStaged(target) {
 
 function pack(packageDirectory, outputDir) {
   const packageJson = packageMetadata(packageDirectory);
+  const npm = npmInvocation();
   const result = spawnSync(
-    process.platform === 'win32' ? 'npm.cmd' : 'npm',
-    ['pack', '--ignore-scripts', '--json', '--pack-destination', outputDir],
+    npm.command,
+    [...npm.argsPrefix, 'pack', '--ignore-scripts', '--json', '--pack-destination', outputDir],
     { cwd: path.join(root, 'packages', packageDirectory), encoding: 'utf8' },
   );
   if (result.error || result.status !== 0) {

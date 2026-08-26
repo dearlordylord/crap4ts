@@ -12,9 +12,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { stage, targets } = require('./stage-platform.js');
 const { validateReport } = require('./validate-report.js');
+const { npmInvocation } = require('./npm-command.js');
 
 const root = path.resolve(__dirname, '..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const target = `${process.platform}-${process.arch}`;
 
 function parseArgs(args) {
@@ -96,9 +96,10 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
       2,
     ),
   );
+  const npm = npmInvocation();
   run(
-    npm,
-    ['install', '--ignore-scripts', '--offline', '--omit=optional', '--no-audit', '--no-fund'],
+    npm.command,
+    [...npm.argsPrefix, 'install', '--ignore-scripts', '--offline', '--omit=optional', '--no-audit', '--no-fund'],
     consumer,
   );
 
