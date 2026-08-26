@@ -117,6 +117,7 @@ function clearGeneratedFiles(directory, version) {
     ...targetNames.map((target) => versionedArchiveName(version, target)),
     'SHA256SUMS',
   '.smoke.ok',
+    '.smoke-report.json',
     'npm/NPM-SHA256SUMS',
   ];
   for (const name of names) {
@@ -326,7 +327,7 @@ function verifyRelease(options) {
   assert.deepEqual([...readManifest(npmManifest).keys()].sort(), [...expectedNpm.keys()].sort(), 'npm SHA256SUMS does not cover exactly the npm tarballs');
   for (const [name, digest] of expectedNpm) assert.equal(readManifest(npmManifest).get(name), digest, `npm checksum mismatch for ${name}`);
 
-  const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'npm', '.smoke.ok']);
+  const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'npm', '.smoke.ok', '.smoke-report.json']);
   for (const entry of fs.readdirSync(releaseDirectory)) {
     if (!allowedRoot.has(entry)) throw new Error(`unexpected release file ${entry}`);
   }

@@ -41,6 +41,10 @@ function main() {
   let smoke;
   try { smoke = JSON.parse(fs.readFileSync(marker, 'utf8')); } catch (error) { throw new Error(`release smoke marker is not valid JSON: ${error.message}`); }
   if (smoke.version !== require('../package.json').version || !smoke.target || !smoke.packages || !smoke.directReportSha256) throw new Error('release smoke marker metadata is incomplete');
+  const reportFile = path.join(path.resolve(options.releaseDir), '.smoke-report.json');
+  if (!fs.existsSync(reportFile)) throw new Error('release smoke report is missing');
+  const reportDigest = crypto.createHash('sha256').update(fs.readFileSync(reportFile)).digest('hex');
+  if (reportDigest !== smoke.directReportSha256) throw new Error('release smoke report digest mismatch');
   for (const [name, expected] of Object.entries(smoke.packages)) {
     const file = path.join(path.resolve(options.releaseDir), 'npm', name);
     if (!fs.existsSync(file)) throw new Error(`smoke marker references missing package ${name}`);

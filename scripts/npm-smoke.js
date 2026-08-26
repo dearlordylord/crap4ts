@@ -144,6 +144,8 @@ function main() {
     stage(target, binary);
     if (options.marker) {
       fs.mkdirSync(path.dirname(path.resolve(options.marker)), { recursive: true });
+      const reportFile = path.join(path.dirname(path.resolve(options.marker)), '.smoke-report.json');
+      fs.writeFileSync(reportFile, direct.stdout);
       const digest = (value) => require('node:crypto').createHash('sha256').update(value).digest('hex');
       const packages = fs.readdirSync(outputDir).filter((file) => file.endsWith('.tgz')).sort();
       fs.writeFileSync(path.resolve(options.marker), `${JSON.stringify({ version: require('../package.json').version, target, packages: Object.fromEntries(packages.map((file) => [file, digest(fs.readFileSync(path.join(outputDir, file)))])), directReportSha256: digest(direct.stdout) }, null, 2)}\n`);
