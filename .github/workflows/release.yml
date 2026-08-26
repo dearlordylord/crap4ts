@@ -91,7 +91,7 @@ jobs:
           $binary = (Resolve-Path "target\${{ matrix.rustTarget }}\release\${{ matrix.binaryName }}").Path
           $fixture = Join-Path $env:RUNNER_TEMP 'crap4ts-generated-smoke'
           New-Item -ItemType Directory -Force $fixture | Out-Null
-          Set-Content (Join-Path $fixture 'coverage-template.json') '{"src/index.ts":{"path":"src/index.ts","fnMap":{"0":{"name":"smoke","decl":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}},"loc":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}}}},"f":{"0":1},"statementMap":{"0":{"start":{"line":1,"column":0},"end":{"line":1,"column":30}},"s":{"0":1},"branchMap":{},"b":{}}}'
+          Set-Content (Join-Path $fixture 'coverage-template.json') '{"src/index.ts":{"path":"src/index.ts","fnMap":{"0":{"name":"smoke","decl":{"start":{"line":1,"column":7},"end":{"line":1,"column":37}},"loc":{"start":{"line":1,"column":7},"end":{"line":1,"column":37}}}},"f":{"0":1},"statementMap":{"0":{"start":{"line":1,"column":26},"end":{"line":1,"column":35}}},"s":{"0":1},"branchMap":{},"b":{}}}'
           $config = '{"coverage_command":{"program":"node.exe","args":["-e","const fs=require(''fs''); const [marker,src,dst]=process.argv.slice(1); if(marker!==''hostile argument ; *'') process.exit(7); fs.copyFileSync(src,dst);","hostile argument ; *","coverage-template.json","coverage-final.json"]}}'
           New-Item -ItemType Directory -Force (Join-Path $fixture 'src') | Out-Null
           Set-Content (Join-Path $fixture 'src/index.ts') 'export function smoke() { return 1; }'
