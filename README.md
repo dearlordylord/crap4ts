@@ -107,6 +107,62 @@ forwarded to stderr, so JSON stdout remains a single report document. Use
 provided directly on the CLI. `--no-generate` selects the existing-artifact
 path even when a command is configured.
 
+### Independent package groups
+
+Monorepos can declare independent package analyses with a `groups` object (or
+an array of objects containing a `name` field):
+
+```json
+{
+  "format": "json",
+  "groups": {
+    "core": {
+      "root": "packages/core",
+      "sources": ["src"],
+      "coverage": {
+        "path": "coverage-final.json",
+        "format": "istanbul",
+        "command": ["npm", "test", "--", "--coverage"]
+      },
+      "threshold": 8
+    },
+    "web": {
+      "root": "packages/web",
+      "sources": ["src"],
+      "coverage": {
+        "path": "coverage/lcov.info",
+        "format": "lcov"
+      },
+      "threshold": 12,
+      "missing_evidence": "report_only"
+    }
+  }
+}
+```
+
+Each group root, source path, coverage artifact, and command is resolved below
+the repository root. Sources and artifacts are relative to the group's root,
+and a command runs with that root as its working directory. Group names must
+be unique; selected source files and generated artifacts cannot be shared.
+All groups are preflighted before generated artifacts are removed or commands
+run. Analysis is acquired and completed in memory for every group before one
+aggregate report is rendered, so a failed group never produces a partial
+report.
+
+Aggregate JSON is schema version 2. Rows contain a structural `group` field,
+repository-root-relative `path` values, and group-qualified `id` values.
+Diagnostics carry the originating `group`, while `groups` records each
+package root, threshold, missing-evidence mode, and exact path overrides. Rows are sorted globally by
+CRAP score (worst first), then group, path, and source position. Group
+declarations are sorted by name for canonical output.
+
+The existing single-project analysis flags (`--coverage`, source paths,
+`--coverage-format`, generation flags, `--threshold`, and missing-evidence
+flags) are intentionally rejected when `groups` is configured; they cannot
+be broadcast implicitly. `--format`, `--json`, `--config`, and
+`--project-root` remain invocation-global controls. Configure every analysis
+setting on its named group.
+
 Values are resolved in this order: built-in defaults, project configuration,
 then explicitly supplied CLI options. The default global threshold is `8`,
 and a gate fails only when a measured score is strictly greater than its

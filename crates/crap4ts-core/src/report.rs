@@ -16,6 +16,12 @@ pub fn render_text(report: &Report) -> String {
         "crap4ts report v{} (threshold: {})\n",
         report.version, report.threshold
     ));
+    for group in &report.groups {
+        output.push_str(&format!(
+            "group {} root={} threshold={}\n",
+            group.name, group.root, group.threshold
+        ));
+    }
     for row in &report.rows {
         let range = format!(
             "{}:{}-{}:{}",
@@ -28,8 +34,13 @@ pub fn render_text(report: &Report) -> String {
         let score = row
             .crap
             .map_or_else(|| "unknown".to_string(), |score| format!("{score:.6}"));
+        let group = row
+            .group
+            .as_deref()
+            .map_or_else(String::new, |group| format!("[{group}] "));
         output.push_str(&format!(
-            "{} {} [{}] {} complexity={} coverage={} crap={}\n",
+            "{}{} {} [{}] {} complexity={} coverage={} crap={}\n",
+            group,
             row.path,
             range,
             row.kind.as_label(),
@@ -43,11 +54,19 @@ pub fn render_text(report: &Report) -> String {
         output.push_str("(no executable TypeScript functions)\n");
     }
     for diagnostic in &report.diagnostics {
-        output.push_str(&format!(
-            "diagnostic [{}]: {}\n",
-            diagnostic.category.as_label(),
-            diagnostic.message
-        ));
+        if let Some(group) = &diagnostic.group {
+            output.push_str(&format!(
+                "diagnostic [{}] group={group}: {}\n",
+                diagnostic.category.as_label(),
+                diagnostic.message
+            ));
+        } else {
+            output.push_str(&format!(
+                "diagnostic [{}]: {}\n",
+                diagnostic.category.as_label(),
+                diagnostic.message
+            ));
+        }
     }
     output
 }

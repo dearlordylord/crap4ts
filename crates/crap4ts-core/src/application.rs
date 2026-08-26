@@ -5,8 +5,8 @@ use std::{cmp::Ordering, collections::BTreeMap, path::Path};
 use crate::{
     coverage::{make_coverage_adapter, CoverageAdapter, CoverageFormat},
     domain::{
-        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportRow,
-        SourceFile,
+        Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, Report, ReportGroup,
+        ReportRow, SourceFile,
     },
     source,
 };
@@ -18,6 +18,16 @@ pub fn crap_score(complexity: Complexity, coverage: f64) -> Result<f64, CoreErro
     }
     let cc = f64::from(complexity.get());
     Ok(cc * cc * (1.0 - coverage).powi(3) + cc)
+}
+
+/// Validate the source-analysis boundary without requiring coverage evidence.
+/// The CLI uses this during package-group preflight so syntax failures in a
+/// later group cannot trigger generation side effects for an earlier group.
+pub fn validate_sources(sources: &[SourceFile]) -> Result<(), CoreError> {
+    for source_file in sources {
+        source::analyze_source(&source_file.path, &source_file.source)?;
+    }
+    Ok(())
 }
 
 /// Threshold policy used by the application quality gate.
@@ -196,6 +206,7 @@ pub fn analyze_with_adapter_and_policy(
         });
         rows.push(ReportRow {
             id: unit.id.clone(),
+            group: None,
             path: unit.path.clone(),
             name: unit.name.clone(),
             kind: unit.kind,
@@ -234,7 +245,115 @@ pub fn analyze_with_adapter_and_policy(
         threshold: policy.global(),
         rows,
         diagnostics,
+        groups: Vec::new(),
     })
+}
+
+/// A completed package analysis awaiting aggregate assembly.
+///
+/// The CLI constructs one of these only after source selection, coverage
+/// acquisition, parsing, attribution, and scoring have all succeeded. This
+/// makes aggregate rendering an all-or-nothing operation: a later package
+/// failure can never expose an earlier package's report.
+#[derive(Clone, Debug)]
+pub struct PackageReport {
+    pub name: String,
+    /// Repository-root-relative package root ("." for the root itself).
+    pub root: String,
+    pub policy: ThresholdPolicy,
+    pub report_only: bool,
+    pub report: Report,
+}
+
+/// Assemble completed package reports into the deterministic version-2
+/// aggregate document. Rows retain their local source ranges and coverage,
+/// while path and id identities are qualified with the package root/name so
+/// same-named functions in different packages cannot collide.
+pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Report {
+    packages.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.root.cmp(&right.root))
+    });
+
+    let mut rows = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut groups = Vec::with_capacity(packages.len());
+    for package in packages {
+        let PackageReport {
+            name,
+            root,
+            policy,
+            report_only,
+            mut report,
+        } = package;
+        let local_root = if root == "." {
+            String::new()
+        } else {
+            root.clone()
+        };
+        for mut row in report.rows.drain(..) {
+            let local_path = row.path.clone();
+            let qualified_path = if local_root.is_empty() {
+                local_path.to_string()
+            } else {
+                format!("{local_root}/{}", local_path.as_str())
+            };
+            // A report row's path is validated at source selection time. The
+            // composed identity is therefore expected to be valid; retaining
+            // the local value on the impossible error keeps this pure
+            // assembly function infallible without introducing a sentinel.
+            if let Ok(path) = crate::domain::ProjectRelativePath::new(&qualified_path) {
+                row.path = path;
+            }
+            let suffix = row
+                .id
+                .strip_prefix(local_path.as_str())
+                .unwrap_or(row.id.as_str());
+            row.id = format!("{name}::{qualified_path}{suffix}");
+            row.group = Some(name.clone());
+            rows.push(row);
+        }
+        diagnostics.extend(
+            report
+                .diagnostics
+                .drain(..)
+                .map(|diagnostic| diagnostic.with_group(name.clone())),
+        );
+        groups.push(ReportGroup {
+            name,
+            root,
+            threshold: policy.global(),
+            report_only,
+            threshold_overrides: policy.path_overrides().clone(),
+        });
+    }
+
+    rows.sort_by(compare_rows);
+    diagnostics.sort_by(compare_diagnostics);
+    // threshold is retained for schema compatibility. With independent
+    // package policies it is a summary only; consumers should use groups.
+    // The minimum is deterministic and conservative for callers that still
+    // inspect the legacy scalar.
+    let threshold = groups
+        .iter()
+        .map(|group| group.threshold)
+        .min()
+        .unwrap_or(0);
+    Report {
+        version: crate::domain::AGGREGATE_REPORT_VERSION,
+        threshold,
+        rows,
+        diagnostics,
+        groups,
+    }
+}
+
+fn compare_diagnostics(left: &Diagnostic, right: &Diagnostic) -> Ordering {
+    left.group
+        .cmp(&right.group)
+        .then_with(|| left.category.cmp(&right.category))
+        .then_with(|| left.message.cmp(&right.message))
 }
 
 /// Analyze an artifact after selecting its coverage format.
@@ -256,10 +375,12 @@ pub fn analyze_with_root_and_format(
 }
 
 fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
+    let group_order = || left.group.cmp(&right.group);
     match (left.crap, right.crap) {
         (Some(left_score), Some(right_score)) => right_score
             .partial_cmp(&left_score)
             .unwrap_or(Ordering::Equal)
+            .then_with(group_order)
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
@@ -269,8 +390,9 @@ fn compare_rows(left: &ReportRow, right: &ReportRow) -> Ordering {
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => left
-            .path
-            .cmp(&right.path)
+            .group
+            .cmp(&right.group)
+            .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.range.start.offset.cmp(&right.range.start.offset))
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
             .then_with(|| left.name.cmp(&right.name))
@@ -299,6 +421,7 @@ mod tests {
         };
         ReportRow {
             id: format!("{path}::f"),
+            group: None,
             path,
             name: "f".to_string(),
             kind: crate::domain::FunctionKind::FunctionDeclaration,
@@ -343,5 +466,55 @@ mod tests {
         assert_eq!(policy.threshold_for(&other), 8);
         assert!(!policy.gate_breached_rows(&[row("src/a.ts", Some(1.0))]));
         assert!(policy.gate_breached_rows(&[row("src/a.ts", Some(1.000_001))]));
+    }
+
+    #[test]
+    fn aggregate_reports_qualify_repository_identity_and_sort_groups() {
+        let first = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: 8,
+            rows: vec![row("src/file.ts", Some(2.0))],
+            diagnostics: vec![Diagnostic::new(
+                DiagnosticCategory::CoverageAttribution,
+                "stale coverage",
+            )],
+            groups: Vec::new(),
+        };
+        let second = crate::domain::Report {
+            version: crate::domain::REPORT_VERSION,
+            threshold: 8,
+            rows: vec![row("src/file.ts", Some(2.0))],
+            diagnostics: Vec::new(),
+            groups: Vec::new(),
+        };
+        let report = aggregate_reports(vec![
+            PackageReport {
+                name: "z".to_string(),
+                root: "packages/z".to_string(),
+                policy: ThresholdPolicy::new(8),
+                report_only: false,
+                report: first,
+            },
+            PackageReport {
+                name: "a".to_string(),
+                root: "packages/a".to_string(),
+                policy: ThresholdPolicy::new(8),
+                report_only: false,
+                report: second,
+            },
+        ]);
+        assert_eq!(report.version, crate::domain::AGGREGATE_REPORT_VERSION);
+        assert_eq!(
+            report
+                .groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(report.rows[0].group.as_deref(), Some("a"));
+        assert_eq!(report.rows[0].path.as_str(), "packages/a/src/file.ts");
+        assert_eq!(report.rows[0].id, "a::packages/a/src/file.ts::f");
+        assert_eq!(report.diagnostics[0].group.as_deref(), Some("z"));
     }
 }

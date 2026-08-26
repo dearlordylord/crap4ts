@@ -2,6 +2,7 @@ mod config;
 mod generation;
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -11,8 +12,9 @@ use std::{
 use clap::{error::ErrorKind, ArgAction, Parser};
 use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
 use crap4ts_core::{
-    analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter, render_json,
-    render_text, CoverageFormat, Diagnostic,
+    aggregate_reports, analyze_with_adapter_and_policy, collect_sources, make_coverage_adapter,
+    render_json, render_text, validate_sources, CoverageAdapter, CoverageFormat, Diagnostic,
+    DiagnosticCategory, PackageReport, ProjectRelativePath, SourceFile, ThresholdPolicy,
 };
 
 #[derive(Debug, Parser)]
@@ -172,11 +174,19 @@ fn render_failure(message: &str, json_output: bool, diagnostics: &[Diagnostic]) 
             eprintln!("diagnostic [{category}]: {message}");
         } else {
             for diagnostic in diagnostics {
-                eprintln!(
-                    "diagnostic [{}]: {}",
-                    diagnostic.category.as_label(),
-                    diagnostic.message
-                );
+                if let Some(group) = &diagnostic.group {
+                    eprintln!(
+                        "diagnostic [{}] group={group}: {}",
+                        diagnostic.category.as_label(),
+                        diagnostic.message
+                    );
+                } else {
+                    eprintln!(
+                        "diagnostic [{}]: {}",
+                        diagnostic.category.as_label(),
+                        diagnostic.message
+                    );
+                }
             }
         }
     }
@@ -210,6 +220,14 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     let root = canonicalize_path(root_hint, "project root")?;
     let values = load_config(cli, &root)?;
 
+    if values.groups.is_some() {
+        return execute_groups(cli, &root, &values);
+    }
+
+    execute_single(cli, &root, &values)
+}
+
+fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, CliFailure> {
     let coverage = cli
         .coverage
         .clone()
@@ -218,7 +236,7 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
             "configuration: coverage artifact is required (provide --coverage or config)"
                 .to_string()
         })?;
-    let command = resolved_coverage_command(cli, &values)?;
+    let command = resolved_coverage_command(cli, values)?;
     let mut requested = if cli.source_paths.is_empty() && cli.source_options.is_empty() {
         values.sources.clone().unwrap_or_default()
     } else {
@@ -227,7 +245,7 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     if !(cli.source_paths.is_empty() && cli.source_options.is_empty()) {
         requested.extend(cli.source_options.iter().cloned());
     }
-    let sources = collect_sources(&root, &requested).map_err(|error| error.to_string())?;
+    let sources = collect_sources(root, &requested).map_err(|error| error.to_string())?;
     if sources.is_empty() {
         return Err(
             "configuration: source selection produced no TypeScript files"
@@ -236,7 +254,7 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
         );
     }
 
-    let format = resolved_format(cli, &values);
+    let format = resolved_format(cli, values);
     let coverage_format = cli
         .coverage_format
         .or(values.coverage_format)
@@ -252,10 +270,10 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
     } else {
         values.report_only.unwrap_or(false)
     };
-    let policy = config::policy(&values, threshold);
+    let policy = config::policy(values, threshold);
 
     let coverage = if let Some(command) = command {
-        generation::generate(&root, &coverage, &command).map_err(CliFailure::from)?
+        generation::generate(root, &coverage, &command).map_err(CliFailure::from)?
     } else {
         let coverage_path = if coverage.is_absolute() {
             coverage
@@ -270,7 +288,7 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
         })?
     };
     let adapter =
-        make_coverage_adapter(coverage_format, &coverage, &root).map_err(|error| CliFailure {
+        make_coverage_adapter(coverage_format, &coverage, root).map_err(|error| CliFailure {
             message: error.to_string(),
             diagnostics: error.diagnostics().to_vec(),
         })?;
@@ -293,6 +311,437 @@ fn execute(cli: &Cli) -> Result<i32, CliFailure> {
         Ok(2)
     } else {
         Ok(0)
+    }
+}
+
+/// A fully resolved, preflighted group. No coverage command is run until
+/// every group has an instance of this atomic bundle, so
+/// configuration/source/path failures are observed before any generated
+/// artifact is removed.
+struct ResolvedPackageGroup {
+    name: String,
+    root: PathBuf,
+    root_identity: String,
+    sources: Vec<SourceFile>,
+    artifact: PathBuf,
+    coverage_format: CoverageFormat,
+    command: Option<Vec<String>>,
+    policy: ThresholdPolicy,
+    report_only: bool,
+    /// Existing artifacts are parsed during preflight and retained in memory.
+    /// Generated groups fill this field only after their command succeeds.
+    adapter: Option<Box<dyn CoverageAdapter>>,
+}
+
+fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, CliFailure> {
+    reject_multi_group_cli_overrides(cli)?;
+    let groups = values
+        .groups
+        .as_ref()
+        .expect("group branch checked by execute");
+
+    let mut resolved = Vec::with_capacity(groups.len());
+    let mut selected_files = BTreeMap::<String, String>::new();
+    let mut artifacts = BTreeMap::<PathBuf, String>::new();
+
+    // This is the complete preflight pass. It performs only validation and
+    // reads source files; generation side effects start after this loop.
+    for group in groups {
+        let group_root = resolve_group_root(root, group.root.as_deref())
+            .map_err(|error| group_failure(&group.name, error, &[]))?;
+        let root_identity = repository_identity(root, &group_root)
+            .map_err(|error| group_failure(&group.name, error, &[]))?;
+        let requested = group
+            .settings
+            .sources
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| group_relative_path(path, &root_identity))
+            .collect::<Vec<_>>();
+        let sources = collect_sources(&group_root, &requested)
+            .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
+        if sources.is_empty() {
+            return Err(group_failure(
+                &group.name,
+                "configuration: source selection produced no TypeScript files".to_string(),
+                &[],
+            ));
+        }
+        validate_sources(&sources)
+            .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
+
+        for source in &sources {
+            let absolute = group_root.join(source.path.as_str());
+            let canonical = fs::canonicalize(&absolute).map_err(|error| {
+                group_failure(
+                    &group.name,
+                    format!(
+                        "configuration: unable to resolve selected source '{}': {error}",
+                        source.path
+                    ),
+                    &[],
+                )
+            })?;
+            let identity = ProjectRelativePath::from_filesystem_path(&canonical, root)
+                .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?
+                .to_string();
+            if let Some(previous) = selected_files.insert(identity.clone(), group.name.clone()) {
+                return Err(group_failure(
+                    &group.name,
+                    format!(
+                        "configuration: selected source '{}' overlaps package group '{}'",
+                        identity, previous
+                    ),
+                    &[],
+                ));
+            }
+        }
+
+        let configured_artifact = group
+            .settings
+            .coverage
+            .clone()
+            .map(|path| group_relative_path(path, &root_identity))
+            .ok_or_else(|| {
+                group_failure(
+                    &group.name,
+                    "configuration: coverage artifact is required for every package group"
+                        .to_string(),
+                    &[],
+                )
+            })?;
+        let artifact = generation::validate_artifact_path(&group_root, &configured_artifact)
+            .map_err(|error| group_failure(&group.name, error, &[]))?;
+        let artifact_key =
+            artifact_identity(&artifact).map_err(|error| group_failure(&group.name, error, &[]))?;
+        if let Some(previous) = artifacts.insert(artifact_key, group.name.clone()) {
+            return Err(group_failure(
+                &group.name,
+                format!(
+                    "configuration: coverage artifact is shared with package group '{}'",
+                    previous
+                ),
+                &[],
+            ));
+        }
+
+        let command = group.settings.coverage_command.clone();
+        if let Some(command) = &command {
+            generation::validate_command(command)
+                .map_err(|error| group_failure(&group.name, error, &[]))?;
+        }
+        let threshold = group.settings.threshold.unwrap_or(DEFAULT_THRESHOLD);
+        let policy = group_policy(&group.settings, threshold, &root_identity);
+        let adapter = if command.is_none() {
+            let coverage = read_group_artifact(&group_root, &artifact)
+                .map_err(|error| group_failure(&group.name, error, &[]))?;
+            let adapter = make_coverage_adapter(
+                group.settings.coverage_format.unwrap_or_default(),
+                &coverage,
+                &group_root,
+            )
+            .map_err(|error| {
+                group_failure(
+                    &group.name,
+                    error.to_string(),
+                    &qualified_diagnostics(&group.name, error.diagnostics()),
+                )
+            })?;
+            Some(adapter)
+        } else {
+            None
+        };
+        resolved.push(ResolvedPackageGroup {
+            name: group.name.clone(),
+            root: group_root,
+            root_identity,
+            sources,
+            artifact,
+            coverage_format: group.settings.coverage_format.unwrap_or_default(),
+            command,
+            policy,
+            report_only: group.settings.report_only.unwrap_or(false),
+            adapter,
+        });
+    }
+
+    let mut packages = Vec::with_capacity(resolved.len());
+    let mut breached = false;
+    for mut group in resolved {
+        let adapter = if let Some(adapter) = group.adapter.take() {
+            adapter
+        } else {
+            let coverage = acquire_group_coverage(&group)
+                .map_err(|error| group_failure(&group.name, error, &[]))?;
+            make_coverage_adapter(group.coverage_format, &coverage, &group.root).map_err(
+                |error| {
+                    group_failure(
+                        &group.name,
+                        error.to_string(),
+                        &qualified_diagnostics(&group.name, error.diagnostics()),
+                    )
+                },
+            )?
+        };
+        let report = analyze_with_adapter_and_policy(
+            &group.sources,
+            adapter.as_ref(),
+            &group.policy,
+            group.report_only,
+        )
+        .map_err(|error| {
+            group_failure(
+                &group.name,
+                error.to_string(),
+                &qualified_diagnostics(&group.name, error.diagnostics()),
+            )
+        })?;
+        breached |= group.policy.gate_breached(&report);
+        packages.push(PackageReport {
+            name: group.name,
+            root: group.root_identity,
+            policy: group.policy,
+            report_only: group.report_only,
+            report,
+        });
+    }
+
+    // Rendering occurs exactly once and only after every package has reached
+    // a completed in-memory report.
+    let report = aggregate_reports(packages);
+    let format = resolved_format(cli, values);
+    if format == OutputFormat::Json {
+        let document = render_json(&report)
+            .map_err(|error| format!("configuration: unable to render JSON report: {error}"))?;
+        println!("{document}");
+    } else {
+        print!("{}", render_text(&report));
+    }
+    if breached {
+        eprintln!("quality gate breached: one or more CRAP scores exceed the effective threshold");
+        Ok(2)
+    } else {
+        Ok(0)
+    }
+}
+
+fn reject_multi_group_cli_overrides(cli: &Cli) -> Result<(), CliFailure> {
+    let has_sources = !cli.source_paths.is_empty() || !cli.source_options.is_empty();
+    if cli.coverage.is_some()
+        || cli.coverage_format.is_some()
+        || cli.coverage_command.is_some()
+        || !cli.coverage_args.is_empty()
+        || cli.generate
+        || cli.no_generate
+        || cli.threshold.is_some()
+        || cli.report_only
+        || cli.no_report_only
+        || has_sources
+    {
+        return Err(
+            "configuration: single-project analysis flags cannot be used with groups; set the value on each named group"
+                .to_string()
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn resolve_group_root(repo_root: &Path, configured: Option<&Path>) -> Result<PathBuf, String> {
+    let configured = configured.unwrap_or_else(|| Path::new("."));
+    let text = configured.to_str().ok_or_else(|| {
+        format!(
+            "configuration: package group root '{}' must be valid UTF-8",
+            configured.display()
+        )
+    })?;
+    if text.is_empty() || text.contains('\0') {
+        return Err(format!(
+            "configuration: package group root '{}' is empty or contains NUL",
+            configured.display()
+        ));
+    }
+    let normalized = text.replace('\\', "/");
+    if !configured.is_absolute() && normalized.split('/').any(|component| component == "..") {
+        return Err(format!(
+            "configuration: package group root '{}' contains parent traversal",
+            configured.display()
+        ));
+    }
+    let path = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        repo_root.join(normalized)
+    };
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        format!(
+            "configuration: unable to resolve package group root '{}': {error}",
+            path.display()
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        format!(
+            "configuration: unable to inspect package group root '{}': {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "configuration: package group root '{}' is not a directory",
+            path.display()
+        ));
+    }
+    if !canonical.starts_with(repo_root) {
+        return Err(format!(
+            "configuration: package group root '{}' escapes repository root '{}'",
+            path.display(),
+            repo_root.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn repository_identity(repo_root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path.strip_prefix(repo_root).map_err(|_| {
+        format!(
+            "configuration: package group root '{}' escapes repository root '{}'",
+            path.display(),
+            repo_root.display()
+        )
+    })?;
+    let value = relative
+        .to_str()
+        .ok_or_else(|| {
+            format!(
+                "configuration: package group root '{}' is not UTF-8",
+                path.display()
+            )
+        })?
+        .replace('\\', "/");
+    Ok(if value.is_empty() {
+        ".".to_string()
+    } else {
+        value
+    })
+}
+
+/// Accept both the documented group-local spelling and a repository-root
+/// spelling for paths copied from a monorepo manifest. The latter is reduced
+/// to the local identity before source selection/coverage parsing, so a group
+/// can never accidentally inspect a sibling package.
+fn group_relative_path(path: PathBuf, root_identity: &str) -> PathBuf {
+    if path.is_absolute() || root_identity == "." {
+        return path;
+    }
+    let Some(value) = path.to_str() else {
+        return path;
+    };
+    let normalized = value.replace('\\', "/");
+    let prefix = format!("{root_identity}/");
+    if let Some(local) = normalized.strip_prefix(&prefix) {
+        PathBuf::from(local)
+    } else {
+        path
+    }
+}
+
+fn group_policy(values: &ConfigValues, global: u32, root_identity: &str) -> ThresholdPolicy {
+    values.threshold_overrides.iter().fold(
+        ThresholdPolicy::new(global),
+        |policy, (path, threshold)| {
+            let path = group_relative_path(PathBuf::from(path.as_str()), root_identity);
+            let Ok(path) = ProjectRelativePath::new(path.to_string_lossy().as_ref()) else {
+                return policy;
+            };
+            policy.with_path_override(path, *threshold)
+        },
+    )
+}
+
+fn artifact_identity(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|error| {
+            format!(
+                "configuration: unable to resolve coverage artifact '{}': {error}",
+                path.display()
+            )
+        });
+    }
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "configuration: coverage artifact '{}' has no parent",
+            path.display()
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "configuration: unable to resolve coverage artifact parent '{}': {error}",
+            parent.display()
+        )
+    })?;
+    Ok(canonical_parent.join(path.file_name().ok_or_else(|| {
+        format!(
+            "configuration: coverage artifact '{}' has no file name",
+            path.display()
+        )
+    })?))
+}
+
+fn read_group_artifact(root: &Path, configured: &Path) -> Result<String, String> {
+    // Recheck the validated path immediately before reading it. This keeps an
+    // existing-mode symlink replacement from escaping the group boundary and
+    // mirrors generated-mode safety.
+    let artifact = generation::validate_artifact_path(root, configured)?;
+    fs::read_to_string(&artifact).map_err(|error| {
+        format!(
+            "configuration: unable to read coverage artifact '{}': {error}",
+            artifact.display()
+        )
+    })
+}
+
+fn acquire_group_coverage(group: &ResolvedPackageGroup) -> Result<String, String> {
+    if let Some(command) = &group.command {
+        generation::generate(&group.root, &group.artifact, command)
+    } else {
+        read_group_artifact(&group.root, &group.artifact)
+    }
+}
+
+fn qualified_diagnostics(group: &str, diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .cloned()
+        .map(|diagnostic| diagnostic.with_group(group.to_string()))
+        .collect()
+}
+
+fn group_failure(group: &str, message: String, diagnostics: &[Diagnostic]) -> CliFailure {
+    let diagnostics = if diagnostics.is_empty() {
+        vec![Diagnostic {
+            group: Some(group.to_string()),
+            category: category_for_message(&message),
+            message: message.clone(),
+        }]
+    } else {
+        diagnostics.to_vec()
+    };
+    CliFailure {
+        message: format!("package group '{group}': {message}"),
+        diagnostics,
+    }
+}
+
+fn category_for_message(message: &str) -> DiagnosticCategory {
+    match diagnostic_category(message) {
+        "coverage_attribution" => DiagnosticCategory::CoverageAttribution,
+        "coverage_parsing" => DiagnosticCategory::CoverageParsing,
+        "missing_evidence" => DiagnosticCategory::MissingEvidence,
+        "source_parsing" => DiagnosticCategory::SourceParsing,
+        "coverage_command" => DiagnosticCategory::CoverageCommand,
+        "unsafe_path" => DiagnosticCategory::UnsafePath,
+        _ => DiagnosticCategory::Configuration,
     }
 }
 

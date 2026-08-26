@@ -300,15 +300,12 @@ impl ThresholdConfig {
     }
 }
 
-/// The closed schema for `crap4ts.json`.
-///
-/// Fields that are not represented here are rejected by serde's
-/// `deny_unknown_fields`, including executable command fields.  Coverage
-/// generation is represented by an explicit argv command, never executable
-/// configuration code or an implicitly parsed shell string.
+/// The settings shared by the legacy project configuration and each named
+/// package group. Keeping this as a closed schema means a group cannot
+/// accidentally acquire a second command/configuration language.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct FileConfig {
+struct SettingsConfig {
     #[serde(default, deserialize_with = "reject_null")]
     sources: Option<PathList>,
     #[serde(
@@ -409,6 +406,61 @@ struct FileConfig {
     missing_coverage: Option<MissingEvidencePolicy>,
 }
 
+/// A package group's settings. `root` is interpreted relative to the
+/// repository root by the application layer; source and artifact paths are
+/// interpreted relative to that resolved group root.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct GroupConfig {
+    #[serde(
+        default,
+        alias = "packageRoot",
+        alias = "package-root",
+        alias = "package_root",
+        deserialize_with = "reject_null"
+    )]
+    root: Option<PathBuf>,
+    #[serde(flatten)]
+    settings: SettingsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct NamedGroupConfig {
+    name: String,
+    #[serde(flatten)]
+    group: GroupConfig,
+}
+
+/// Groups accept either a map (the concise form) or an array (useful when a
+/// generated configuration wants to keep names beside their settings).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GroupConfigSet {
+    Map(BTreeMap<String, GroupConfig>),
+    List(Vec<NamedGroupConfig>),
+}
+
+/// The closed schema for `crap4ts.json`.
+///
+/// Top-level source/coverage/policy settings are retained for backwards
+/// compatibility. They are deliberately mutually exclusive with `groups`:
+/// broadcasting a single-project setting to independent packages is unsafe.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    #[serde(flatten)]
+    settings: SettingsConfig,
+    #[serde(
+        default,
+        alias = "packageGroups",
+        alias = "package-groups",
+        alias = "package_groups",
+        alias = "packages",
+        deserialize_with = "reject_null"
+    )]
+    groups: Option<GroupConfigSet>,
+}
+
 /// Values loaded from configuration before explicit CLI precedence is applied.
 #[derive(Debug, Default)]
 pub(crate) struct ConfigValues {
@@ -421,9 +473,19 @@ pub(crate) struct ConfigValues {
     pub(crate) threshold: Option<u32>,
     pub(crate) threshold_overrides: BTreeMap<ProjectRelativePath, u32>,
     pub(crate) report_only: Option<bool>,
+    pub(crate) groups: Option<Vec<PackageGroupValues>>,
 }
 
-impl FileConfig {
+/// Normalized package-group configuration. Paths are still relative until
+/// the CLI resolves them against the canonical repository root.
+#[derive(Debug)]
+pub(crate) struct PackageGroupValues {
+    pub(crate) name: String,
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) settings: ConfigValues,
+}
+
+impl SettingsConfig {
     fn into_values(self) -> Result<ConfigValues, String> {
         let sources = match (self.sources, self.source, self.source_roots) {
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
@@ -562,6 +624,90 @@ impl FileConfig {
             threshold,
             threshold_overrides,
             report_only,
+            groups: None,
+        })
+    }
+}
+
+impl FileConfig {
+    fn into_values(self) -> Result<ConfigValues, String> {
+        let settings = self.settings.into_values()?;
+        let Some(groups) = self.groups else {
+            return Ok(settings);
+        };
+
+        // Output selection is meaningful for the aggregate document, but all
+        // analysis inputs and gate policy must be declared per group. This
+        // explicit rejection prevents an apparently harmless top-level
+        // default from leaking into one package and not another.
+        if settings.sources.is_some()
+            || settings.coverage.is_some()
+            || settings.coverage_format.is_some()
+            || settings.coverage_command.is_some()
+            || settings.threshold.is_some()
+            || !settings.threshold_overrides.is_empty()
+            || settings.report_only.is_some()
+        {
+            return Err(
+                "top-level source, coverage, command, or policy settings cannot be combined with groups; configure each group explicitly"
+                    .to_string(),
+            );
+        }
+
+        let groups = match groups {
+            GroupConfigSet::Map(entries) => entries.into_iter().collect::<Vec<_>>(),
+            GroupConfigSet::List(entries) => entries
+                .into_iter()
+                .map(|entry| (entry.name, entry.group))
+                .collect::<Vec<_>>(),
+        };
+        if groups.is_empty() {
+            return Err("groups must contain at least one package group".to_string());
+        }
+
+        let mut normalized = Vec::with_capacity(groups.len());
+        let mut names = HashSet::new();
+        for (name, group) in groups {
+            if name.trim().is_empty() {
+                return Err("package group name must not be empty".to_string());
+            }
+            if name.contains("::") || name.contains('\0') {
+                return Err(format!(
+                    "package group name '{name}' contains a reserved delimiter"
+                ));
+            }
+            if !names.insert(name.clone()) {
+                return Err(format!("duplicate package group name '{name}'"));
+            }
+            let mut values = group.settings.into_values()?;
+            // A group has its own output controls only by accident: an
+            // aggregate can emit one format, so reject those fields rather
+            // than silently selecting one group's preference.
+            if values.format.is_some() || values.json.is_some() {
+                return Err(format!(
+                    "package group '{name}' cannot define aggregate output format"
+                ));
+            }
+            values.groups = None;
+            normalized.push(PackageGroupValues {
+                name,
+                root: group.root,
+                settings: values,
+            });
+        }
+        normalized.sort_by(|left, right| left.name.cmp(&right.name));
+
+        Ok(ConfigValues {
+            sources: None,
+            coverage: None,
+            coverage_format: None,
+            coverage_command: None,
+            format: settings.format,
+            json: settings.json,
+            threshold: None,
+            threshold_overrides: BTreeMap::new(),
+            report_only: None,
+            groups: Some(normalized),
         })
     }
 }
@@ -773,5 +919,57 @@ mod tests {
         )
         .expect_err("command strings must be rejected");
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn named_group_map_is_normalized_by_name_and_keeps_settings_isolated() {
+        let config: FileConfig = serde_json::from_str(
+            r#"{
+                "format":"json",
+                "groups":{
+                    "z":{"root":"packages/z","sources":["src"],"coverage":{"path":"z.info","format":"lcov"},"threshold":12},
+                    "a":{"root":"packages/a","sources":["src"],"coverage":{"path":"a.json","format":"istanbul"},"threshold":3}
+                }
+            }"#,
+        )
+        .unwrap();
+        let values = config.into_values().unwrap();
+        let groups = values.groups.unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(
+            groups[0].settings.coverage_format,
+            Some(CoverageFormat::Istanbul)
+        );
+        assert_eq!(
+            groups[1].settings.coverage_format,
+            Some(CoverageFormat::Lcov)
+        );
+        assert_eq!(groups[0].settings.threshold, Some(3));
+        assert_eq!(groups[1].settings.threshold, Some(12));
+    }
+
+    #[test]
+    fn group_array_rejects_duplicate_names_and_top_level_analysis_defaults() {
+        let duplicate = serde_json::from_str::<FileConfig>(
+            r#"{"groups":[{"name":"a","coverage":"a.json"},{"name":"a","coverage":"b.json"}]}"#,
+        )
+        .unwrap()
+        .into_values()
+        .expect_err("duplicate names must fail");
+        assert!(duplicate.contains("duplicate package group name"));
+
+        let ambiguous = serde_json::from_str::<FileConfig>(
+            r#"{"coverage":"coverage.json","groups":{"a":{"coverage":"a.json"}}}"#,
+        )
+        .unwrap()
+        .into_values()
+        .expect_err("top-level coverage must not broadcast");
+        assert!(ambiguous.contains("cannot be combined with groups"));
     }
 }

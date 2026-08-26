@@ -1,4 +1,4 @@
-use std::{fmt, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 use serde::{
     de::{self, Visitor},
@@ -8,6 +8,8 @@ use thiserror::Error;
 
 /// Version of the canonical JSON report document.
 pub const REPORT_VERSION: u32 = 1;
+/// Version of the aggregate package-group JSON report document.
+pub const AGGREGATE_REPORT_VERSION: u32 = REPORT_VERSION + 1;
 
 /// A validated project-relative path. Absolute paths, parent traversal, and
 /// platform-specific drive prefixes are rejected at this boundary.
@@ -239,6 +241,10 @@ pub struct FunctionUnit {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ReportRow {
     pub id: String,
+    /// Present for aggregate package reports. Legacy single-project reports
+    /// omit this field to preserve their v1 JSON shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub path: ProjectRelativePath,
     pub name: String,
     pub kind: FunctionKind,
@@ -258,10 +264,12 @@ pub struct ReportRow {
 pub enum DiagnosticCategory {
     Configuration,
     CoverageAttribution,
+    CoverageCommand,
     CoverageParsing,
     MissingEvidence,
     SourceParsing,
     ThresholdBreach,
+    UnsafePath,
 }
 
 impl DiagnosticCategory {
@@ -269,10 +277,12 @@ impl DiagnosticCategory {
         match self {
             Self::Configuration => "configuration",
             Self::CoverageAttribution => "coverage_attribution",
+            Self::CoverageCommand => "coverage_command",
             Self::CoverageParsing => "coverage_parsing",
             Self::MissingEvidence => "missing_evidence",
             Self::SourceParsing => "source_parsing",
             Self::ThresholdBreach => "threshold_breach",
+            Self::UnsafePath => "unsafe_path",
         }
     }
 }
@@ -280,6 +290,9 @@ impl DiagnosticCategory {
 /// Deterministic user-facing diagnostic.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Diagnostic {
+    /// Present when a diagnostic originated in one package group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub category: DiagnosticCategory,
     pub message: String,
 }
@@ -287,10 +300,33 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub(crate) fn new(category: DiagnosticCategory, message: impl Into<String>) -> Self {
         Self {
+            group: None,
             category,
             message: message.into(),
         }
     }
+
+    /// Attach a stable package-group identity while assembling an aggregate
+    /// report. The category and message remain the normalized diagnostic
+    /// contract shared with single-project analysis.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+}
+
+/// Per-package policy metadata carried by an aggregate report. Threshold
+/// overrides remain exact paths relative to the package root; report rows are
+/// separately qualified to repository-root identities.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ReportGroup {
+    pub name: String,
+    /// `"."` denotes the repository root; other values use `/` separators.
+    pub root: String,
+    pub threshold: u32,
+    pub report_only: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub threshold_overrides: BTreeMap<ProjectRelativePath, u32>,
 }
 
 /// Canonical report document. It intentionally contains no timestamp.
@@ -300,6 +336,10 @@ pub struct Report {
     pub threshold: u32,
     pub rows: Vec<ReportRow>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Package metadata is omitted from legacy reports and present for the
+    /// version-2 aggregate schema.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ReportGroup>,
 }
 
 #[derive(Debug, Error)]

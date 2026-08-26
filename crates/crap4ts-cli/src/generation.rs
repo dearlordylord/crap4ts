@@ -49,7 +49,7 @@ impl CommandSpec {
                 argv
             }
         };
-        validate_argv(&argv)?;
+        validate_command(&argv)?;
         Ok(argv)
     }
 }
@@ -63,7 +63,7 @@ pub(crate) fn generate(
     configured_artifact: &Path,
     argv: &[String],
 ) -> Result<String, String> {
-    validate_argv(argv)?;
+    validate_command(argv)?;
     let artifact = validate_artifact_path(root, configured_artifact)?;
     remove_existing_artifact(root, &artifact)?;
 
@@ -85,7 +85,7 @@ pub(crate) fn generate(
     read_fresh_artifact(root, &artifact)
 }
 
-fn validate_argv(argv: &[String]) -> Result<(), String> {
+pub(crate) fn validate_command(argv: &[String]) -> Result<(), String> {
     if argv.is_empty() {
         return Err("configuration: coverage command must contain a program".to_string());
     }
@@ -216,7 +216,7 @@ fn validate_artifact_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()
 /// symlink in its existing path.  Missing final components are allowed (the
 /// configured command may create them), but the nearest existing parent must
 /// remain within the canonical project root.
-fn validate_artifact_path(root: &Path, configured: &Path) -> Result<PathBuf, String> {
+pub(crate) fn validate_artifact_path(root: &Path, configured: &Path) -> Result<PathBuf, String> {
     let root = fs::canonicalize(root).map_err(|error| {
         format!(
             "unsafe coverage artifact path '{}': unable to resolve project root: {error}",

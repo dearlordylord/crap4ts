@@ -12,14 +12,15 @@ mod report;
 mod source;
 
 pub use application::{
-    analyze, analyze_with_adapter, analyze_with_adapter_and_policy, analyze_with_policy,
-    analyze_with_root, analyze_with_root_and_format, crap_score, ThresholdPolicy,
+    aggregate_reports, analyze, analyze_with_adapter, analyze_with_adapter_and_policy,
+    analyze_with_policy, analyze_with_root, analyze_with_root_and_format, crap_score,
+    validate_sources, PackageReport, ThresholdPolicy,
 };
 pub use coverage::{coverage_adapter, make_coverage_adapter, CoverageAdapter, CoverageFormat};
 pub use domain::{
     Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionKind, FunctionUnit,
-    ProjectRelativePath, Report, ReportRow, SourceFile, SourcePosition, SourceRange,
-    REPORT_VERSION,
+    ProjectRelativePath, Report, ReportGroup, ReportRow, SourceFile, SourcePosition, SourceRange,
+    AGGREGATE_REPORT_VERSION, REPORT_VERSION,
 };
 pub use path::collect_sources;
 pub use report::{render_json, render_text};
