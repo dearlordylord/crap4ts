@@ -109,7 +109,8 @@ function clearGeneratedFiles(directory, version) {
   const names = [
     ...targetNames.map((target) => versionedArchiveName(version, target)),
     'SHA256SUMS',
-    '.smoke.ok',
+  '.smoke.ok',
+    'npm/SHA256SUMS',
   ];
   for (const name of names) {
     const file = path.join(directory, name);
@@ -170,6 +171,15 @@ function archiveEntries(archive) {
     .sort();
 }
 
+function assertArchiveHasOnlyRegularFiles(archive, expected) {
+  const listing = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' });
+  for (const line of listing.split(/\r?\n/).filter(Boolean)) {
+    const type = line[0];
+    if (type !== 'd' && type !== '-') throw new Error(`${archive} contains a symlink or special archive entry`);
+  }
+  assert.deepEqual(archiveEntries(archive), expected, `${archive} contains unexpected or missing entries`);
+}
+
 function expectedArchiveEntries(target) {
   const descriptor = targets[target];
   return [
@@ -185,15 +195,7 @@ function hashFile(file) {
 }
 
 function distributableFiles(directory, version) {
-  const archives = targetNames.map((target) => path.join(directory, versionedArchiveName(version, target)));
-  const npmDirectory = path.join(directory, 'npm');
-  const packages = fs.existsSync(npmDirectory)
-    ? fs.readdirSync(npmDirectory)
-        .filter((name) => name.endsWith('.tgz'))
-        .sort()
-        .map((name) => path.join(npmDirectory, name))
-    : [];
-  return [...archives, ...packages];
+  return targetNames.map((target) => path.join(directory, versionedArchiveName(version, target)));
 }
 
 function actualStandaloneArchives(directory) {
@@ -267,6 +269,9 @@ function verifyNpmPackages(directory, version) {
     const item = byName.get(descriptor.packageName);
     assert.ok(item, `missing ${descriptor.packageName} archive`);
     assert.ok(item.entries.includes(`package/${descriptor.binaryPath}`), `${descriptor.packageName} archive is missing ${descriptor.binaryPath}`);
+    assert.deepEqual(item.metadata.os, [descriptor.os], `${descriptor.packageName} os metadata mismatch`);
+    assert.deepEqual(item.metadata.cpu, [descriptor.cpu], `${descriptor.packageName} cpu metadata mismatch`);
+    assert.equal(item.metadata.crap4tsBinary, descriptor.binaryPath, `${descriptor.packageName} binary mapping mismatch`);
   }
   const meta = byName.get('crap4ts');
   assert.ok(meta, 'missing crap4ts meta-package archive');
@@ -289,9 +294,6 @@ function verifyRelease(options) {
   const manifest = path.join(releaseDirectory, 'SHA256SUMS');
   ensureRegularFile(manifest, 'SHA256SUMS');
   const files = distributableFiles(releaseDirectory, version);
-  if (files.length !== targetNames.length + packageNames.length) {
-    throw new Error(`release has ${files.length} distributable files; expected ${targetNames.length + packageNames.length}`);
-  }
   const actualArchives = actualStandaloneArchives(releaseDirectory);
   const expectedArchives = targetNames
     .map((target) => path.join(releaseDirectory, versionedArchiveName(version, target)))
@@ -300,9 +302,23 @@ function verifyRelease(options) {
   for (const target of targetNames) {
     const archive = path.join(releaseDirectory, versionedArchiveName(version, target));
     ensureRegularFile(archive, `${target} archive`);
-    assert.deepEqual(archiveEntries(archive), expectedArchiveEntries(target), `${target} archive contents are incomplete or ambiguous`);
+    assertArchiveHasOnlyRegularFiles(archive, expectedArchiveEntries(target));
   }
   verifyNpmPackages(releaseDirectory, version);
+  const npmManifest = path.join(releaseDirectory, 'npm', 'SHA256SUMS');
+  ensureRegularFile(npmManifest, 'npm SHA256SUMS');
+  const expectedNpm = new Map(fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')).map((name) => [name, hashFile(path.join(releaseDirectory, 'npm', name))]));
+  assert.deepEqual([...readManifest(npmManifest).keys()].sort(), [...expectedNpm.keys()].sort(), 'npm SHA256SUMS does not cover exactly the npm tarballs');
+  for (const [name, digest] of expectedNpm) assert.equal(readManifest(npmManifest).get(name), digest, `npm checksum mismatch for ${name}`);
+
+  const allowedRoot = new Set([...expectedArchives.map((file) => path.basename(file)), 'SHA256SUMS', 'npm', '.smoke.ok']);
+  for (const entry of fs.readdirSync(releaseDirectory)) {
+    if (!allowedRoot.has(entry) && !entry.startsWith('.standalone-')) throw new Error(`unexpected release file ${entry}`);
+  }
+  const allowedNpm = new Set([...fs.readdirSync(path.join(releaseDirectory, 'npm')).filter((name) => name.endsWith('.tgz')), 'SHA256SUMS']);
+  for (const entry of fs.readdirSync(path.join(releaseDirectory, 'npm'))) {
+    if (!allowedNpm.has(entry)) throw new Error(`unexpected npm release file ${entry}`);
+  }
 
   const expectedManifest = new Map();
   for (const file of files) {
@@ -314,7 +330,7 @@ function verifyRelease(options) {
     assert.equal(actualManifest.get(name), digest, `checksum mismatch for ${name}`);
   }
   if (options.requireSmoke) ensureRegularFile(path.join(releaseDirectory, '.smoke.ok'), 'release smoke marker');
-  process.stdout.write(`verified ${version}: ${files.length} distributable assets, five targets, npm packages, and checksums\n`);
+  process.stdout.write(`verified ${version}: ${files.length} standalone assets, five targets, npm packages, and checksums\n`);
 }
 
 function assembleRelease(options) {
@@ -340,11 +356,9 @@ function assembleRelease(options) {
     }
     packAll(binaryDirectory, packageOutput);
     const files = distributableFiles(releaseDirectory, version);
-    if (files.length !== targetNames.length + packageNames.length) {
-      throw new Error(`release assembly produced ${files.length} assets; expected ${targetNames.length + packageNames.length}`);
-    }
     verifyNpmPackages(releaseDirectory, version);
     writeManifest(files, path.join(releaseDirectory, 'SHA256SUMS'));
+    writeManifest(fs.readdirSync(packageOutput).filter((name) => name.endsWith('.tgz')).map((name) => path.join(packageOutput, name)), path.join(packageOutput, 'SHA256SUMS'));
     // Verify before returning so assembly cannot hand a caller a partial set.
     verifyRelease({ releaseDir: releaseDirectory, requireSmoke: false });
     process.stdout.write(`assembled ${version} release in ${releaseDirectory}\n`);

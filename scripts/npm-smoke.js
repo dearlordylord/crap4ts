@@ -18,16 +18,16 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const target = `${process.platform}-${process.arch}`;
 
 function parseArgs(args) {
-  const options = { binary: undefined, marker: undefined };
+  const options = { binary: undefined, marker: undefined, releaseDir: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument === '--binary' || argument === '--marker') {
+    if (argument === '--binary' || argument === '--marker' || argument === '--release-dir') {
       const value = args[index + 1];
       if (!value || value.startsWith('-')) throw new Error(`${argument} requires a value`);
       options[argument.slice(2)] = value;
       index += 1;
     } else if (argument === '--help' || argument === '-h') {
-      process.stdout.write('Usage: node scripts/npm-smoke.js [--binary PATH] [--marker PATH]\n');
+      process.stdout.write('Usage: node scripts/npm-smoke.js --release-dir DIR --binary PATH [--marker PATH]\n');
       return null;
     } else {
       throw new Error(`unknown argument ${argument}`);
@@ -130,20 +130,12 @@ function main() {
     const direct = run(binary, ['--format', 'json'], directFixture);
     assertMixedReport(direct, 'direct binary');
 
-    const outputDir = path.join(temporaryRoot, 'packages');
-    run(
-      process.execPath,
-      [
-        path.join(root, 'scripts', 'pack-platform.js'),
-        '--target',
-        target,
-        '--binary',
-        binary,
-        '--output-dir',
-        outputDir,
-      ],
-      root,
-    );
+    const outputDir = options.releaseDir
+      ? path.join(path.resolve(options.releaseDir), 'npm')
+      : path.join(temporaryRoot, 'packages');
+    if (!options.releaseDir) {
+      run(process.execPath, [path.join(root, 'scripts', 'pack-platform.js'), '--target', target, '--binary', binary, '--output-dir', outputDir], root);
+    }
     packageSmoke(temporaryRoot, outputDir, direct);
     // The workspace package tests run immediately after this pretest hook and
     // exercise the launcher through npm's workspace symlink. Keep the host
@@ -152,7 +144,9 @@ function main() {
     stage(target, binary);
     if (options.marker) {
       fs.mkdirSync(path.dirname(path.resolve(options.marker)), { recursive: true });
-      fs.writeFileSync(path.resolve(options.marker), 'mixed Istanbul/LCOV direct and npm smoke passed\n');
+      const digest = (value) => require('node:crypto').createHash('sha256').update(value).digest('hex');
+      const packages = fs.readdirSync(outputDir).filter((file) => file.endsWith('.tgz')).sort();
+      fs.writeFileSync(path.resolve(options.marker), `${JSON.stringify({ version: require('../package.json').version, target, packages: Object.fromEntries(packages.map((file) => [file, digest(fs.readFileSync(path.join(outputDir, file)))])), directReportSha256: digest(direct.stdout) }, null, 2)}\n`);
     }
     process.stdout.write(`npm smoke passed for ${target} (mixed Istanbul/LCOV workspace)\n`);
   } finally {

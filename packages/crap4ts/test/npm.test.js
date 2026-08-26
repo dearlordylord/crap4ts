@@ -123,7 +123,7 @@ test('Rust and npm package versions are checked together', () => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /versions aligned at 0\.1\.0/);
+  assert.match(result.stdout, /versions aligned at 1\.0\.0/);
 });
 
 test('Windows package accepts a mode-0644 executable payload', () => {

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Exact semver tag to release (for example v0.1.0)
+        description: Exact semver tag to release (for example v1.0.0)
         required: true
         type: string
       publish:
@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,7 +38,7 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
@@ -53,17 +57,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Install Rust with fmt and clippy
-        uses: dtolnay/rust-toolchain@1.94.0
+        uses: dtolnay/rust-toolchain@e97e3d8cc4a3f6f2f7f0c8d9d6a8c3e6f8d7a2b1 # 1.94.0
         with:
           targets: ${{ matrix.rustTarget }}
           components: rustfmt, clippy
       - name: Install Node.js for metadata checks
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.x'
       - name: Build release binary
@@ -80,7 +84,7 @@ jobs:
           node scripts/check-versions.js --binary "$binary"
           cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
       - name: Upload target binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-binary-${{ matrix.target }}
           path: dist/binaries/
@@ -93,23 +97,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.x'
           cache: npm
       - name: Install locked npm dependencies
         run: npm ci
       - name: Download every target binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-binary-*
           path: dist/binaries
           merge-multiple: true
+      - name: Restore trusted executable mode after artifact transport
+        shell: bash
+        run: chmod 755 dist/binaries/crap4ts-linux-x64 dist/binaries/crap4ts-linux-arm64 dist/binaries/crap4ts-darwin-x64 dist/binaries/crap4ts-darwin-arm64
       - name: Validate exact semver tag and versions
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -119,18 +126,19 @@ jobs:
           git fetch origin main --no-tags || true
           base_ref=origin/master
           git rev-parse --verify --quiet "$base_ref" >/dev/null || base_ref=origin/main
-          git merge-base --is-ancestor HEAD "$base_ref"
+          test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$(git rev-parse "$base_ref")"
           npm run check:versions -- --tag "$RELEASE_TAG"
       - name: Assemble standalone archives, npm packages, and checksums
         run: node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
       - name: Validate both JSON report contracts with the release binary
         run: node scripts/check-schemas.js --binary dist/binaries/crap4ts-linux-x64
       - name: Direct and packed npm mixed-workspace smoke
-        run: node scripts/npm-smoke.js --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
+        run: node scripts/npm-smoke.js --release-dir dist/release --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
       - name: Fail closed before publication
         run: node scripts/release-gate.js --release-dir dist/release
       - name: Upload verified release directory
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: crap4ts-release
           path: dist/release/
@@ -140,50 +148,56 @@ jobs:
 
   publish:
     name: Publish verified assets
-    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    if: github.event_name == 'push' || inputs.publish == true
     needs: assemble
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.x'
           registry-url: https://registry.npmjs.org
       - name: Download verified release directory
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: crap4ts-release
           path: dist/release
       - name: Re-run publication gate
         run: node scripts/release-gate.js --release-dir dist/release
-      - name: Publish native npm packages before meta-package
+      - name: Create protected draft release
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release create "$RELEASE_TAG" --draft --verify-tag --title "crap4ts $RELEASE_TAG" --notes "Automated release; assets are gated below." || gh release view "$RELEASE_TAG"
+      - name: Publish native npm packages before meta-package
         shell: bash
         run: |
-          test -n "$NODE_AUTH_TOKEN"
           version=$(node -p "require('./package.json').version")
           for target in $(node -e 'process.stdout.write(Object.keys(require("./release-targets.json")).sort().join(" "))'); do
             package="dist/release/npm/crap4ts-${target}-${version}.tgz"
             test -f "$package"
-            npm publish "$package" --access public
+            npm publish "$package" --access public --provenance
           done
       - name: Publish npm meta-package last
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          npm publish "dist/release/npm/crap4ts-${version}.tgz" --access public
+          npm publish "dist/release/npm/crap4ts-${version}.tgz" --access public --provenance
       - name: Upload standalone archives and checksums to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        run: gh release upload "$RELEASE_TAG" dist/release/*.tar.gz dist/release/SHA256SUMS --clobber
+        run: gh release upload "$RELEASE_TAG" dist/release/*.tar.gz dist/release/SHA256SUMS
+      - name: Finalize release after all gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

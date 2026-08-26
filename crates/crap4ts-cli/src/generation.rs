@@ -19,8 +19,9 @@ use serde::Deserialize;
 
 /// Declarative command configuration.
 ///
-/// The short form is an argv array, for example `['npm', 'test']` on POSIX
-/// (use `['npm.cmd', 'test']` on Windows). The
+/// The short form is an argv array, for example `['npm', 'test']` on POSIX.
+/// On Windows use a native executable such as `node.exe` with the npm CLI
+/// JavaScript file as an argument; `.cmd` and `.bat` shims are rejected. The
 /// object form is useful when a config author wants to make the program and
 /// arguments visually distinct: `{ "program": "npm", "args": ["test"] }`.
 /// Neither form invokes a shell.  A shell can still be used intentionally by
@@ -71,7 +72,7 @@ pub(crate) fn generate(
     let artifact = validate_artifact_path(root, configured_artifact)?;
     remove_existing_artifact(root, &artifact)?;
 
-    let mut command = Command::new(command_program(&argv[0]));
+    let mut command = Command::new(&argv[0]);
     command
         .args(&argv[1..])
         .current_dir(root)
@@ -124,25 +125,16 @@ pub(crate) fn validate_command(argv: &[String]) -> Result<(), String> {
     if argv[0].is_empty() {
         return Err("configuration: coverage command program must not be empty".to_string());
     }
+    if cfg!(windows) {
+        let program = argv[0].to_ascii_lowercase();
+        if program.ends_with(".cmd") || program.ends_with(".bat") {
+            return Err("configuration: .cmd/.bat coverage shims are unsupported; use a native .exe (for example node.exe with npm-cli.js)".to_string());
+        }
+    }
     if argv.iter().any(|argument| argument.contains('\0')) {
         return Err("configuration: coverage command arguments must not contain NUL".to_string());
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn command_program(program: &str) -> &str {
-    // Windows npm exposes a command shim (`npm.cmd`) rather than a native
-    // executable. Command is intentionally still invoked without a shell;
-    // callers should name the shim explicitly in configuration. This helper
-    // exists as a single platform seam for tests and future executable
-    // resolution without changing argv boundaries.
-    program
-}
-
-#[cfg(not(windows))]
-fn command_program(program: &str) -> &str {
-    program
 }
 
 fn status_description(status: ExitStatus) -> String {
@@ -486,16 +478,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_command_specs_name_npm_cmd_without_shell_rewriting() {
+    fn windows_command_specs_reject_cmd_shims() {
         let spec = CommandSpec::Argv(vec![
             "npm.cmd".to_string(),
             "test".to_string(),
             "--".to_string(),
             "--coverage".to_string(),
         ]);
-        let argv = spec.into_argv().unwrap();
-        assert_eq!(argv[0], "npm.cmd");
-        assert_eq!(command_program(&argv[0]), "npm.cmd");
+        let error = spec.into_argv().unwrap_err();
+        assert!(error.contains(".cmd/.bat"));
     }
 
     #[test]

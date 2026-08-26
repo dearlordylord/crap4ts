@@ -252,7 +252,7 @@ Every release publishes one archive per supported target. The names are
 unambiguous and include the semantic version and target:
 
 ```text
-crap4ts-0.1.0-linux-x64.tar.gz
+crap4ts-1.0.0-linux-x64.tar.gz
 crap4ts-0.1.0-linux-arm64.tar.gz
 crap4ts-0.1.0-darwin-x64.tar.gz
 crap4ts-0.1.0-darwin-arm64.tar.gz
@@ -260,7 +260,8 @@ crap4ts-0.1.0-win32-x64.tar.gz
 ```
 
 Each archive contains the native executable, `LICENSE`, and this README.
-`SHA256SUMS` covers exactly those five archives and the six npm tarballs;
+`SHA256SUMS` covers exactly those five standalone archives. The npm directory
+contains its own `SHA256SUMS` for the six npm tarballs;
 verify it before extracting an archive:
 
 ```sh
@@ -282,8 +283,8 @@ The analyzer accepts an existing artifact by default. Istanbul
 an LCOV tracefile. To generate fresh evidence, configure an argv array (or use
 `--coverage-command` with repeated `--coverage-arg` values). Arguments are
 passed directly and are never shell-split. On Windows, npm is a command shim,
-so generated configuration must use `npm.cmd`, for example
-`["npm.cmd", "test", "--", "--coverage"]`; this retains direct argv
+`.cmd` and `.bat` shims are rejected; generated configuration must use a
+native executable such as `node.exe` with npm's CLI JavaScript file, preserving direct argv
 semantics and does not invoke a shell.
 
 Generated mode removes only the explicitly configured, project-local artifact,
@@ -325,7 +326,7 @@ Maintainers can assemble and verify without publishing anything:
 npm run check:versions
 npm run check:schemas
 node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
-node scripts/npm-smoke.js --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
+node scripts/npm-smoke.js --release-dir dist/release --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
 node scripts/release-gate.js --release-dir dist/release
 ```
 

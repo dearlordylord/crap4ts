@@ -29,7 +29,8 @@ Cargo-built binary instead.
 The CLI reads `crap4ts.json` (or `.crap4ts.json`/`crap4ts.config.json`) as
 strict JSON. A project can use an existing Istanbul artifact (the default), an
 LCOV tracefile (`--coverage-format lcov`), or a direct argv coverage command.
-Generated commands are never shell-split; on Windows use `npm.cmd` rather than
+Generated commands are never shell-split; Windows `.cmd`/`.bat` shims are
+rejected, so use a native `.exe` (for example `node.exe` plus npm-cli.js) rather than
 `npm` in a command array. Generated coverage is deleted and recreated only
 inside the project root, and child output is forwarded to stderr.
 

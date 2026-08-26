@@ -8,6 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { verifyRelease } = require('./release.js');
+const crypto = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 
@@ -36,6 +37,15 @@ function main() {
   const marker = path.join(path.resolve(options.releaseDir), '.smoke.ok');
   if (!fs.existsSync(marker)) {
     throw new Error(`release smoke marker is missing: ${marker}`);
+  }
+  let smoke;
+  try { smoke = JSON.parse(fs.readFileSync(marker, 'utf8')); } catch (error) { throw new Error(`release smoke marker is not valid JSON: ${error.message}`); }
+  if (smoke.version !== require('../package.json').version || !smoke.target || !smoke.packages || !smoke.directReportSha256) throw new Error('release smoke marker metadata is incomplete');
+  for (const [name, expected] of Object.entries(smoke.packages)) {
+    const file = path.join(path.resolve(options.releaseDir), 'npm', name);
+    if (!fs.existsSync(file)) throw new Error(`smoke marker references missing package ${name}`);
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    if (actual !== expected) throw new Error(`smoke marker digest mismatch for ${name}`);
   }
   verifyRelease(options);
   process.stdout.write('publication gate passed; no publication was performed\n');

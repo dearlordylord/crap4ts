@@ -1,6 +1,6 @@
 {
   "name": "@crap4ts/linux-x64",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Linux x64 binary for crap4ts",
   "license": "MIT",
   "os": [
