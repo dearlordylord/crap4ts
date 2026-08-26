@@ -8,18 +8,24 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { verifyRelease } = require('./release.js');
+const { targets } = require('./stage-platform.js');
 const crypto = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 
 function parseArgs(args) {
-  const options = { releaseDir: path.join(root, 'dist', 'release'), requireSmoke: true };
+  const options = { releaseDir: path.join(root, 'dist', 'release'), requireSmoke: true, binaryManifest: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === '--release-dir') {
       const value = args[index + 1];
       if (!value || value.startsWith('-')) throw new Error('--release-dir requires a value');
       options.releaseDir = value;
+      index += 1;
+    } else if (argument === '--binary-manifest') {
+      const value = args[index + 1];
+      if (!value || value.startsWith('-')) throw new Error('--binary-manifest requires a value');
+      options.binaryManifest = value;
       index += 1;
     } else if (argument === '--help' || argument === '-h') {
       process.stdout.write('Usage: node scripts/release-gate.js [--release-dir DIR]\n');
@@ -40,7 +46,7 @@ function main() {
   }
   let smoke;
   try { smoke = JSON.parse(fs.readFileSync(marker, 'utf8')); } catch (error) { throw new Error(`release smoke marker is not valid JSON: ${error.message}`); }
-  if (smoke.version !== require('../package.json').version || !smoke.target || !smoke.packages || !smoke.directReportSha256) throw new Error('release smoke marker metadata is incomplete');
+  if (smoke.version !== require('../package.json').version || !targets[smoke.target] || !smoke.packages || !smoke.directReportSha256) throw new Error('release smoke marker metadata is incomplete or unsupported');
   const reportFile = path.join(path.resolve(options.releaseDir), '.smoke-report.json');
   if (!fs.existsSync(reportFile)) throw new Error('release smoke report is missing');
   const reportDigest = crypto.createHash('sha256').update(fs.readFileSync(reportFile)).digest('hex');

@@ -222,23 +222,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node - <<'NODE'
-          const { classify, assertSafe } = require('./scripts/publication-plan.js');
-          const fs = require('fs');
-          const files = fs.readdirSync('dist/release').filter((n) => n.endsWith('.tar.gz') || n === 'SHA256SUMS').map((n) => ({ name: n, path: `dist/release/${n}` }));
-          assertSafe(classify(files, {}));
-          NODE
+          remote_json=$(gh release view "$RELEASE_TAG" --json assets)
+          node -e 'const {classify,assertSafe}=require("./scripts/publication-plan.js"); const fs=require("fs"); const remote=JSON.parse(process.argv[1]).assets.reduce((m,a)=>(m[a.name]=(a.digest||"").replace(/^sha256:/,""),m),{}); const files=process.argv.slice(2).map(path=>({name:require("path").basename(path),path})); const names=new Set(files.map(x=>x.name)); for(const name of Object.keys(remote)) if(!names.has(name)) throw new Error("unexpected stale release asset "+name); const plan=assertSafe(classify(files,remote)); fs.writeFileSync("/tmp/release-plan.json",JSON.stringify(plan));' "$remote_json" dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS
+          node -e 'for(const x of require("/tmp/release-plan.json")) if(x.action === "publish") console.log(x.name)' > /tmp/release-publish.txt
           for file in dist/release/*.tar.gz dist/release/SHA256SUMS dist/release/BINARY-SHA256SUMS dist/release/npm/NPM-SHA256SUMS; do
             name=$(basename "$file")
-            remote=$(gh release view "$RELEASE_TAG" --json assets --jq ".assets[] | select(.name == \"$name\") | .digest" || true)
-            local="sha256:$(sha256sum "$file" | awk '{print $1}')"
-            if [ -z "$remote" ]; then
+            if grep -Fxq "$name" /tmp/release-publish.txt; then
               gh release upload "$RELEASE_TAG" "$file"
-            elif [ "$remote" = "$local" ]; then
-              echo "skip identical release asset $name"
             else
-              echo "conflicting immutable release asset $name" >&2
-              exit 1
+              echo "skip identical release asset $name"
             fi
           done
       - name: Publish native npm packages before meta-package

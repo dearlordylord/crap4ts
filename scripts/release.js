@@ -271,6 +271,18 @@ function packageArchiveEntries(archive) {
     .map((entry) => entry.replace(/\/$/, ''));
 }
 
+function assertPackageArchive(archive, expected, executable) {
+  const entries = packageArchiveEntries(archive);
+  assert.deepEqual([...entries].sort(), [...expected].sort(), `${archive} contains unexpected package entries`);
+  const listing = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' });
+  for (const line of listing.split(/\r?\n/).filter(Boolean)) if (line[0] !== '-') throw new Error(`${archive} contains a symlink or special entry`);
+  if (executable) {
+    const line = listing.split(/\r?\n/).find((entry) => entry.endsWith(` ${executable}`));
+    const mode = line?.trim().split(/\s+/)[0];
+    if (!mode || mode[0] !== '-' || !/x/.test(mode.slice(1))) throw new Error(`${archive} executable is not mode-executable`);
+  }
+}
+
 function findNpmArchive(directory, packageName, version) {
   const safeName = packageName.replace(/^@/, '').replace('/', '-');
   const expected = `${safeName}-${version}.tgz`;
@@ -302,6 +314,7 @@ function verifyNpmPackages(directory, version) {
     const item = byName.get(descriptor.packageName);
     assert.ok(item, `missing ${descriptor.packageName} archive`);
     assert.ok(item.entries.includes(`package/${descriptor.binaryPath}`), `${descriptor.packageName} archive is missing ${descriptor.binaryPath}`);
+    assertPackageArchive(item.archive, ['package/package.json', 'package/README.md', `package/${descriptor.binaryPath}`], descriptor.os === 'win32' ? undefined : `package/${descriptor.binaryPath}`);
     assert.deepEqual(item.metadata.os, [descriptor.os], `${descriptor.packageName} os metadata mismatch`);
     assert.deepEqual(item.metadata.cpu, [descriptor.cpu], `${descriptor.packageName} cpu metadata mismatch`);
     if (descriptor.libc) assert.deepEqual(item.metadata.libc, [descriptor.libc], `${descriptor.packageName} libc metadata mismatch`);
@@ -314,6 +327,7 @@ function verifyNpmPackages(directory, version) {
   }
   const meta = byName.get('crap4ts');
   assert.ok(meta, 'missing crap4ts meta-package archive');
+  assertPackageArchive(meta.archive, ['package/bin/crap4ts.js', 'package/package.json', 'package/README.md'], 'package/bin/crap4ts.js');
   assert.ok(meta.entries.includes('package/bin/crap4ts.js'), 'meta-package archive is missing executable launcher');
   assert.deepEqual(
     Object.keys(meta.metadata.optionalDependencies || {}).sort(),
@@ -337,6 +351,10 @@ function verifyRelease(options) {
   const binaryManifest = path.join(releaseDirectory, 'BINARY-SHA256SUMS');
   ensureRegularFile(binaryManifest, 'BINARY-SHA256SUMS');
   const trustedDigests = readManifest(binaryManifest);
+  if (options.binaryManifest) {
+    const external = readManifest(path.resolve(options.binaryManifest));
+    assert.deepEqual([...external.entries()], [...trustedDigests.entries()], 'external trusted binary manifest does not match release manifest');
+  }
   const files = distributableFiles(releaseDirectory, version);
   const actualArchives = actualStandaloneArchives(releaseDirectory);
   const expectedArchives = targetNames
