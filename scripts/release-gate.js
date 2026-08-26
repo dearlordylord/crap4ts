@@ -28,7 +28,7 @@ function parseArgs(args) {
       options.binaryManifest = value;
       index += 1;
     } else if (argument === '--help' || argument === '-h') {
-      process.stdout.write('Usage: node scripts/release-gate.js [--release-dir DIR]\n');
+      process.stdout.write('Usage: node scripts/release-gate.js [--release-dir DIR] [--binary-manifest FILE]\n');
       return null;
     } else {
       throw new Error(`unknown argument ${argument}`);
@@ -51,6 +51,9 @@ function main() {
   if (!fs.existsSync(reportFile)) throw new Error('release smoke report is missing');
   const reportDigest = crypto.createHash('sha256').update(fs.readFileSync(reportFile)).digest('hex');
   if (reportDigest !== smoke.directReportSha256) throw new Error('release smoke report digest mismatch');
+  const version = require('../package.json').version;
+  const expectedNames = new Set(['crap4ts-' + version + '.tgz', ...Object.values(targets).map((d) => `${d.packageName.replace(/^@/, '').replace('/', '-')}-${version}.tgz`)]);
+  if (Object.keys(smoke.packages).length !== expectedNames.size || Object.keys(smoke.packages).some((name) => !expectedNames.has(name))) throw new Error('release smoke marker must contain exactly six expected npm packages');
   for (const [name, expected] of Object.entries(smoke.packages)) {
     const file = path.join(path.resolve(options.releaseDir), 'npm', name);
     if (!fs.existsSync(file)) throw new Error(`smoke marker references missing package ${name}`);

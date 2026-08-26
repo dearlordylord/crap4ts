@@ -158,7 +158,16 @@ jobs:
       - name: Direct and packed npm mixed-workspace smoke
         run: node scripts/npm-smoke.js --release-dir dist/release --binary dist/binaries/crap4ts-linux-x64 --marker dist/release/.smoke.ok
       - name: Fail closed before publication
-        run: node scripts/release-gate.js --release-dir dist/release
+        run: |
+          mkdir -p dist/trusted
+          cp dist/release/BINARY-SHA256SUMS dist/trusted/BINARY-SHA256SUMS
+          node scripts/release-gate.js --release-dir dist/release --binary-manifest dist/trusted/BINARY-SHA256SUMS
+      - name: Upload immutable trusted binary manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crap4ts-trusted-binary-manifest
+          path: dist/trusted/BINARY-SHA256SUMS
+          if-no-files-found: error
       - name: Upload verified release directory
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -201,8 +210,13 @@ jobs:
         with:
           name: crap4ts-release
           path: dist/release
+      - name: Download immutable trusted binary manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: crap4ts-trusted-binary-manifest
+          path: dist/trusted
       - name: Re-run publication gate
-        run: node scripts/release-gate.js --release-dir dist/release
+        run: node scripts/release-gate.js --release-dir dist/release --binary-manifest dist/trusted/BINARY-SHA256SUMS
       - name: Create protected draft release
         env:
           GH_TOKEN: ${{ github.token }}

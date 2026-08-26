@@ -351,8 +351,11 @@ function verifyRelease(options) {
   const binaryManifest = path.join(releaseDirectory, 'BINARY-SHA256SUMS');
   ensureRegularFile(binaryManifest, 'BINARY-SHA256SUMS');
   const trustedDigests = readManifest(binaryManifest);
+  assert.deepEqual([...trustedDigests.keys()].sort(), REQUIRED_TARGETS, 'BINARY-SHA256SUMS must contain exactly five supported targets');
   if (options.binaryManifest) {
+    ensureRegularFile(path.resolve(options.binaryManifest), 'external trusted binary manifest');
     const external = readManifest(path.resolve(options.binaryManifest));
+    assert.deepEqual([...external.keys()].sort(), REQUIRED_TARGETS, 'external binary manifest must contain exactly five targets');
     assert.deepEqual([...external.entries()], [...trustedDigests.entries()], 'external trusted binary manifest does not match release manifest');
   }
   const files = distributableFiles(releaseDirectory, version);
