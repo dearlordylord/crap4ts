@@ -43,6 +43,14 @@ dependency filters. Published consumers do not need this flag.
 
 ## Packaging
 
+Linux releases build on Ubuntu 22.04 for both x64 and arm64, with a glibc 2.35
+baseline. CI and release jobs inspect the ELF version requirements and reject
+newer glibc dependencies. Before upload, the exact binary runs in Debian 12,
+and its packed npm launcher/native package is installed and exercised in a
+Debian 12 Node container. These checks cover version/help, Istanbul and LCOV
+analysis, and the threshold failure exit code. The same binaries then enter
+the existing checksum and publication gates.
+
 Maintainers package a prebuilt binary rather than downloading one during npm
 installation. For example, on a Linux arm64 host, stage and check a release
 artifact with:

@@ -10,7 +10,7 @@ package groups.
 
 ## Quick start
 
-Requires Node.js `>=20.19.0 <25`. Native packages support Linux (glibc) and macOS
+Requires Node.js `>=20.19.0 <25`. Native packages support Linux (glibc 2.35+) and macOS
 on x64/arm64, plus Windows x64.
 
 ```sh

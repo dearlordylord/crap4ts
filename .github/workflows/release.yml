@@ -86,6 +86,13 @@ jobs:
           node scripts/check-versions.js --binary "$binary"
           cp "$binary" "dist/binaries/crap4ts-${{ matrix.target }}${{ matrix.os == 'win32' && '.exe' || '' }}"
           sha256sum "$binary" | awk '{print $1 "  ${{ matrix.target }}"}' > "dist/binaries/${{ matrix.target }}.sha256"
+      - name: Install npm smoke dependencies on Linux
+        if: matrix.os == 'linux'
+        run: npm ci --force
+      - name: Linux glibc baseline and Debian 12 compatibility
+        if: matrix.os == 'linux'
+        shell: bash
+        run: node scripts/linux-compat-smoke.js "target/${{ matrix.rustTarget }}/release/${{ matrix.binaryName }}"
       - name: Native Windows generated-mode smoke (direct executable)
         if: matrix.os == 'win32'
         shell: pwsh

@@ -65,3 +65,42 @@ jobs:
         run: npm run check:versions && npm run check:schemas
       - name: Run packaged npm smoke and wrapper tests
         run: npm test
+
+  linux-portability:
+    name: Linux release portability (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-22.04
+          - target: linux-arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check build runner matches release target
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILD_RUNNER: ${{ matrix.runner }}
+        run: node -e 'require("node:assert/strict").equal(require("./release-targets.json")[process.env.TARGET].runner, process.env.BUILD_RUNNER)'
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.x'
+      - name: Build release payload
+        run: cargo build --locked --release -p crap4ts
+      - name: Install npm smoke dependencies
+        run: npm ci --force
+      - name: Audit glibc requirements and run on Debian 12
+        run: node scripts/linux-compat-smoke.js target/release/crap4ts
+      - name: Upload compatibility-tested binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compatibility-${{ matrix.target }}
+          path: target/release/crap4ts
+          retention-days: 7
+          if-no-files-found: error

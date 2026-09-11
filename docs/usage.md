@@ -233,7 +233,9 @@ sha256sum -c SHA256SUMS
 On Windows, use `Get-FileHash` and compare each SHA-256 value in
 `SHA256SUMS` before extracting.
 
-Linux binaries target glibc. Linux musl distributions and unsupported
+Starting with 1.0.2, Linux binaries require glibc 2.35 or newer.
+The 1.0.0 and 1.0.1 Linux builds used Ubuntu 24.04 and can require glibc 2.39. Release builds use Ubuntu 22.04;
+the exact executables are also smoke-tested in Debian 12 on x64 and arm64. Linux musl distributions and unsupported
 operating-system/CPU combinations should build from the Cargo workspace. The
 release target map is checked in at [`release-targets.json`](../release-targets.json)
 so archive names, npm package metadata, and workflow targets cannot drift.
