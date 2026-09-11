@@ -141,7 +141,8 @@ test('Rust and npm package versions are checked together', () => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /versions aligned at 1\.0\.0/);
+  const { version } = require('../package.json');
+  assert.equal(result.stdout.trim(), `crap4ts versions aligned at ${version} (JSON schemas v1/v2)`);
 });
 
 test('Windows package accepts a mode-0644 executable payload', () => {
