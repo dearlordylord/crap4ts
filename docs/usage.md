@@ -73,6 +73,68 @@ forwarded to stderr, so JSON stdout remains a single report document. Use
 provided directly on the CLI. `--no-generate` selects the existing-artifact
 path even when a command is configured.
 
+## Agent workflow recipe
+
+Use crap4ts as a deterministic feedback step after a coding agent changes
+TypeScript or TSX. It identifies complex, poorly tested functions so the agent
+can decide where to add meaningful tests or simplify branching.
+
+Install it in the project being analyzed:
+
+```sh
+npm install --save-dev @crap4ts/crap4ts
+```
+
+This example assumes your project has a `test:coverage` npm script that runs
+tests and writes Istanbul JSON to `coverage/coverage-final.json`. Configure
+your test runner to include the source files you want to analyze, including
+untested files. Adapt the command, coverage path, and source roots to your
+project.
+
+Add the following to `crap4ts.json`, or merge it into your existing
+configuration. Agree on a threshold with your team; this example uses the
+default of `8`.
+
+```json
+{
+  "sources": ["src"],
+  "coverage": {
+    "path": "coverage/coverage-final.json",
+    "format": "istanbul",
+    "command": ["npm", "run", "test:coverage"]
+  },
+  "threshold": 8
+}
+```
+
+Run the gate and save its report:
+
+```sh
+npx crap4ts --format json > crap-report.json
+```
+
+Each invocation regenerates coverage before analysis. The configured artifact
+is removed first, and a failed test command stops analysis rather than reusing
+old coverage. The report goes to the file; test output and diagnostics go to
+stderr. Keep `crap-report.json` out of version control.
+
+Use this instruction in your agent's repository instructions or task prompt:
+
+> After changing TypeScript or TSX, run
+> `npx crap4ts --format json > crap-report.json` and check its exit status.
+> If it exits with 2, inspect the flagged functions in the report. Add tests
+> that exercise missing behavior or simplify branching while preserving
+> behavior, then rerun the gate to regenerate coverage and scores. If it exits
+> with 1, resolve the test, configuration, or coverage error before interpreting
+> scores. Keep the agreed thresholds and source selection intact. If a failure
+> needs work outside the task's scope, report it for review. Summarize the
+> changes and final gate result.
+
+Run the same command in CI after installing dependencies, and preserve its
+exit status so a threshold breach fails the job. A passing CRAP gate measures
+complexity and coverage; it does not establish correctness or test assertion
+quality.
+
 ## Independent package groups
 
 Monorepos can declare independent package analyses with a `groups` object (or

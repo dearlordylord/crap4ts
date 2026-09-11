@@ -1,5 +1,9 @@
 # crap4ts
 
+Inspired by Robert C. Martin (Uncle Bob)'s
+[crap4java](https://github.com/unclebob/crap4java) and
+[crap4clj](https://github.com/unclebob/crap4clj), adapted for TypeScript and TSX.
+
 Find complex, poorly tested TypeScript functions and fail CI when their risk
 exceeds your limit. crap4ts combines cyclomatic complexity and test coverage
 into a per-function CRAP (Change Risk Anti-Patterns) score.
@@ -25,6 +29,16 @@ For LCOV or JSON output:
 npx crap4ts --coverage coverage/lcov.info --coverage-format lcov src
 npx crap4ts --coverage coverage/coverage-final.json src --format json --threshold 12
 ```
+
+## Using crap4ts in an agent workflow
+
+Give a coding agent concrete feedback on complex, poorly tested functions:
+generate coverage, run crap4ts, inspect flagged functions, improve tests or
+simplify the code, then rerun the gate. JSON reports support automated feedback;
+the same thresholds can run in CI.
+
+See the [agent workflow recipe](docs/usage.md#agent-workflow-recipe)
+for configuration and reusable agent instructions.
 
 ## Scoring and CI
 
