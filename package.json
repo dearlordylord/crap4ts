@@ -1,9 +1,17 @@
 {
   "name": "crap4ts-workspace",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Development workspace for the crap4ts Rust CLI and npm distribution",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dearlordylord/crap4ts.git"
+  },
+  "homepage": "https://github.com/dearlordylord/crap4ts#readme",
+  "bugs": {
+    "url": "https://github.com/dearlordylord/crap4ts/issues"
+  },
   "workspaces": [
     "packages/*"
   ],

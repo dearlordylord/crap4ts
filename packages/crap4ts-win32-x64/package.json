@@ -1,8 +1,17 @@
 {
   "name": "@crap4ts/win32-x64",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Windows x64 binary for crap4ts",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dearlordylord/crap4ts.git",
+    "directory": "packages/crap4ts-win32-x64"
+  },
+  "homepage": "https://github.com/dearlordylord/crap4ts#readme",
+  "bugs": {
+    "url": "https://github.com/dearlordylord/crap4ts/issues"
+  },
   "os": [
     "win32"
   ],

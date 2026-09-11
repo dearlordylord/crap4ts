@@ -1,8 +1,31 @@
 {
   "name": "@crap4ts/crap4ts",
-  "version": "1.0.1",
-  "description": "A thin npm launcher for the crap4ts TypeScript CRAP quality gate",
+  "version": "1.0.2",
+  "description": "CRAP metric quality gate for TypeScript and TSX using complexity and test coverage",
+  "keywords": [
+    "typescript",
+    "tsx",
+    "crap",
+    "cyclomatic-complexity",
+    "coverage",
+    "code-quality",
+    "quality-gate",
+    "static-analysis",
+    "istanbul",
+    "lcov",
+    "cli",
+    "ci"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dearlordylord/crap4ts.git",
+    "directory": "packages/crap4ts"
+  },
+  "homepage": "https://github.com/dearlordylord/crap4ts#readme",
+  "bugs": {
+    "url": "https://github.com/dearlordylord/crap4ts/issues"
+  },
   "type": "commonjs",
   "bin": {
     "crap4ts": "bin/crap4ts.js"
@@ -15,11 +38,11 @@
     "node": ">=20.19.0 <25"
   },
   "optionalDependencies": {
-    "@crap4ts/darwin-arm64": "1.0.1",
-    "@crap4ts/darwin-x64": "1.0.1",
-    "@crap4ts/linux-arm64": "1.0.1",
-    "@crap4ts/linux-x64": "1.0.1",
-    "@crap4ts/win32-x64": "1.0.1"
+    "@crap4ts/darwin-arm64": "1.0.2",
+    "@crap4ts/darwin-x64": "1.0.2",
+    "@crap4ts/linux-arm64": "1.0.2",
+    "@crap4ts/linux-x64": "1.0.2",
+    "@crap4ts/win32-x64": "1.0.2"
   },
   "scripts": {
     "pretest": "node ../../scripts/npm-smoke.js",
