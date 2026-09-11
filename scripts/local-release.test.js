@@ -11,9 +11,18 @@ const {
   isMissingReleaseError,
   releaseCommandInvocation,
   requireDraftForUpload,
+  parseArgs,
   selectReleaseRun,
   selectSuccessfulCi,
 } = require('./local-release.js');
+
+test('release arguments allow resume and preflight together and reject mistakes', () => {
+  assert.deepEqual(parseArgs([]), { check: false, resume: false });
+  assert.deepEqual(parseArgs(['--resume', '--check']), { check: true, resume: true });
+  assert.deepEqual(parseArgs(['--check', '--resume']), { check: true, resume: true });
+  assert.throws(() => parseArgs(['--resume', '--resume']), /Usage:/);
+  assert.throws(() => parseArgs(['--resuem']), /Usage:/);
+});
 
 test('local release accepts the active expected GitHub account', () => {
   assert.doesNotThrow(() => assertExpectedGitHubLogin('dearlordylord'));

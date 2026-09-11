@@ -99,4 +99,11 @@ release last. It is safe to retry: identical remote bytes are skipped and
 conflicting bytes stop the release. `pnpm local-release --check` performs only
 the read-only preflight.
 
+If master has advanced since the version was tagged, use
+`pnpm local-release --resume` to finish publishing the existing tagged build.
+The remote tag must exist, identify an ancestor of master, and contain the
+current package version. CI and release artifacts are selected for that tagged
+commit; newer source changes are not included. The tag is not moved. Use
+`pnpm local-release --resume --check` to check this preflight without publishing.
+
 [Usage reference](./usage.md) · [Back to README](../README.md)

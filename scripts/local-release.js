@@ -103,6 +103,17 @@ function assertGreenCi(head) {
   assert.ok(selectSuccessfulCi(runs, head), `CI has no successful completed run for ${head}`);
 }
 
+function resolveResumeHead(head, version, run = command) {
+  const tag = `v${version}`;
+  const remoteRef = `refs/remotes/origin/release-tags/${tag}`;
+  run('git', ['fetch', '--force', 'origin', `refs/tags/${tag}:${remoteRef}`]);
+  const releaseHead = run('git', ['rev-parse', `${remoteRef}^{commit}`]);
+  run('git', ['merge-base', '--is-ancestor', releaseHead, head]);
+  const manifest = JSON.parse(run('git', ['show', `${releaseHead}:package.json`]));
+  assert.equal(manifest.version, version, `remote ${tag} has a different package version`);
+  return releaseHead;
+}
+
 function selectSuccessfulCi(runs, head) {
   return runs.find((run) => run.headSha === head && run.status === 'completed' && run.conclusion === 'success');
 }
@@ -233,16 +244,18 @@ function publishNpmPackages(version, releaseDirectory, temporaryDirectory) {
 }
 
 function parseArgs(args) {
-  if (args.length === 0) return { check: false };
-  if (args.length === 1 && args[0] === '--check') return { check: true };
-  throw new Error('Usage: pnpm local-release [--check]');
+  if (new Set(args).size !== args.length || args.some((arg) => !['--check', '--resume'].includes(arg))) {
+    throw new Error('Usage: pnpm local-release [--check] [--resume]');
+  }
+  return { check: args.includes('--check'), resume: args.includes('--resume') };
 }
 
 function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
   const version = require('../package.json').version;
   const tag = `v${version}`;
-  const head = assertCleanPushedMaster();
+  const workspaceHead = assertCleanPushedMaster();
+  const head = options.resume ? resolveResumeHead(workspaceHead, version) : workspaceHead;
   assertExpectedGitHubLogin(command('gh', ['api', 'user', '--jq', '.login']));
   command('npm', ['whoami']);
   assertGreenCi(head);
@@ -251,7 +264,7 @@ function main(args = process.argv.slice(2)) {
     process.stdout.write(`release preflight passed for ${tag} at ${head}\n`);
     return;
   }
-  ensureTag(tag, head);
+  if (!options.resume) ensureTag(tag, head);
   const runId = findReleaseRun(head, tag);
   command('gh', ['run', 'watch', runId, '--exit-status'], { inherit: true });
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `crap4ts-${tag}-`));
@@ -283,6 +296,7 @@ module.exports = {
   releaseAssetFiles,
   releaseCommandInvocation,
   requireDraftForUpload,
+  resolveResumeHead,
   selectReleaseRun,
   selectSuccessfulCi,
 };
