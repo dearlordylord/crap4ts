@@ -43,18 +43,15 @@ test('Windows pack metadata may omit the launcher executable bit', () => {
   assert.doesNotThrow(() => verifyMetaPack({
     packageJson: {
       name: '@crap4ts/crap4ts',
-      optionalDependencies: Object.fromEntries(
-        Object.values(require('../release-targets.json')).map(({ packageName }) => [packageName, '1.0.0']),
-      ),
+      crap4tsBinaries: metaPackage.crap4tsBinaries,
     },
     metadata: { files: [{ path: 'bin/crap4ts.js', mode: 0o644 }] },
   }, 'win32'));
 });
 
-test('npm smoke public identity is the scoped meta-package identity', () => {
+test('npm smoke public identity is the scoped bundled package identity', () => {
   assert.equal(metaPackage.name, '@crap4ts/crap4ts');
-  assert.deepEqual(smokeConsumerDependencies('meta.tgz', '@crap4ts/linux-x64', 'native.tgz'), {
+  assert.deepEqual(smokeConsumerDependencies('meta.tgz'), {
     '@crap4ts/crap4ts': 'file:meta.tgz',
-    '@crap4ts/linux-x64': 'file:native.tgz',
   });
 });

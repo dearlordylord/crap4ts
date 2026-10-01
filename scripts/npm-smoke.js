@@ -71,23 +71,17 @@ function assertMixedReport(result, label) {
   return report;
 }
 
-function smokeConsumerDependencies(metaArchive, nativePackage, nativeArchive) {
-  return {
-    '@crap4ts/crap4ts': `file:${metaArchive}`,
-    [nativePackage]: `file:${nativeArchive}`,
-  };
+function smokeConsumerDependencies(metaArchive) {
+  return { '@crap4ts/crap4ts': `file:${metaArchive}` };
 }
 
 function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
   const archives = fs.readdirSync(outputDir).filter((file) => file.endsWith('.tgz'));
-  const nativeArchive = archives.find((file) => file.includes(targets[target].packageName.split('/').pop()));
   const metaArchive = archives.find((file) => file.startsWith('crap4ts-crap4ts-'));
-  assert.ok(nativeArchive, `native archive for ${target} missing`);
-  assert.ok(metaArchive, 'meta-package archive missing');
+  assert.ok(metaArchive, 'bundled package archive missing');
 
   const consumer = path.join(temporaryRoot, 'consumer');
   fs.mkdirSync(consumer, { recursive: true });
-  const nativePackage = targets[target].packageName;
   fs.writeFileSync(
     path.join(consumer, 'package.json'),
     JSON.stringify(
@@ -96,8 +90,6 @@ function packageSmoke(temporaryRoot, outputDir, expectedDirect) {
         private: true,
         dependencies: smokeConsumerDependencies(
           path.join(outputDir, metaArchive),
-          nativePackage,
-          path.join(outputDir, nativeArchive),
         ),
       },
       null,
@@ -165,7 +157,7 @@ function main() {
     // The workspace package tests run immediately after this pretest hook and
     // exercise the launcher through npm's workspace symlink. Keep the host
     // payload available for that local-only test; release assembly uses
-    // packAll directly and always removes staged files in its finally block.
+    // packTargets directly and always removes staged files in its finally block.
     stage(target, binary);
     if (options.marker) {
       fs.mkdirSync(path.dirname(path.resolve(options.marker)), { recursive: true });

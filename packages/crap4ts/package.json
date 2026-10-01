@@ -1,6 +1,6 @@
 {
   "name": "@crap4ts/crap4ts",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "CRAP metric quality gate for TypeScript and TSX using complexity and test coverage",
   "keywords": [
     "typescript",
@@ -32,20 +32,21 @@
   },
   "files": [
     "bin",
+    "native",
     "README.md"
   ],
   "engines": {
     "node": ">=20.19.0 <25"
   },
-  "optionalDependencies": {
-    "@crap4ts/darwin-arm64": "1.0.2",
-    "@crap4ts/darwin-x64": "1.0.2",
-    "@crap4ts/linux-arm64": "1.0.2",
-    "@crap4ts/linux-x64": "1.0.2",
-    "@crap4ts/win32-x64": "1.0.2"
-  },
   "scripts": {
     "pretest": "node ../../scripts/npm-smoke.js",
     "test": "node --test --test-concurrency=1 test/npm.test.js"
+  },
+  "crap4tsBinaries": {
+    "linux-x64": "native/linux-x64/crap4ts",
+    "linux-arm64": "native/linux-arm64/crap4ts",
+    "darwin-x64": "native/darwin-x64/crap4ts",
+    "darwin-arm64": "native/darwin-arm64/crap4ts",
+    "win32-x64": "native/win32-x64/crap4ts.exe"
   }
 }

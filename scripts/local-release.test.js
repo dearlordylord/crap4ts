@@ -2,7 +2,6 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const targets = require('../release-targets.json');
 const { validatedUrl } = require('./download.js');
 const {
   assertExpectedGitHubLogin,
@@ -32,14 +31,14 @@ test('local release accepts the active expected GitHub account', () => {
   );
 });
 
-test('local release publishes all native packages before the scoped meta-package', () => {
+test('local release publishes only the bundled scoped package', () => {
   const plan = npmPublicationPlan('1.2.3');
-  const nativeNames = Object.values(targets).map(({ packageName }) => packageName).sort();
+  const names = ['@crap4ts/crap4ts'];
 
-  assert.deepEqual(plan.map(({ name }) => name), [...nativeNames, '@crap4ts/crap4ts']);
+  assert.deepEqual(plan.map(({ name }) => name), names);
   assert.deepEqual(
     plan.map(({ tarball }) => tarball),
-    [...nativeNames, '@crap4ts/crap4ts'].map((name) => packageTarballName(name, '1.2.3')),
+    names.map((name) => packageTarballName(name, '1.2.3')),
   );
 });
 

@@ -163,13 +163,10 @@ function main(options = {}) {
     }
   }
   const wrapper = metadataByName.get('@crap4ts/crap4ts');
-  for (const [name, version] of Object.entries(wrapper?.optionalDependencies || {})) {
-    if (version !== rustVersion) {
-      mismatches.push(`crap4ts optional dependency ${name} is ${version}`);
-    }
-    if (metadataByName.get(name)?.version !== rustVersion) {
-      mismatches.push(`${name} package is not present at ${rustVersion}`);
-    }
+  if (Object.keys(wrapper?.optionalDependencies || {}).length) mismatches.push('bundled npm package must not have optional dependencies');
+  const expectedBinaries = Object.fromEntries(Object.entries(targetDefinitions).map(([target, descriptor]) => [target, descriptor.binaryPath]));
+  if (JSON.stringify(wrapper?.crap4tsBinaries) !== JSON.stringify(expectedBinaries)) {
+    mismatches.push('bundled binary mapping does not match release targets');
   }
   const locked = lockfileVersions();
   const lockedRoot = lockfileRoot();
@@ -182,21 +179,6 @@ function main(options = {}) {
       mismatches.push(
         `package-lock.json has ${metadata.name} at ${locked.get(metadata.name) || '<missing>'}`,
       );
-    }
-  }
-  for (const [target, descriptor] of Object.entries(targetDefinitions)) {
-    const packageMetadata = metadataByName.get(descriptor.packageName);
-    if (!packageMetadata) {
-      mismatches.push(`${target} package ${descriptor.packageName} is missing`);
-      continue;
-    }
-    if (packageMetadata.crap4tsBinary !== descriptor.binaryPath) {
-      mismatches.push(
-        `${descriptor.packageName} declares ${packageMetadata.crap4tsBinary || '<missing>'}, expected ${descriptor.binaryPath}`,
-      );
-    }
-    if (packageMetadata.os?.[0] !== descriptor.os || packageMetadata.cpu?.[0] !== descriptor.cpu) {
-      mismatches.push(`${descriptor.packageName} platform metadata does not match ${target}`);
     }
   }
   const cargoLocked = cargoPackageVersions();

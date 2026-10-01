@@ -91,9 +91,9 @@ function stage(target, source) {
   const packageRoot = path.join(root, 'packages', descriptor.packageDirectory);
   const packageJsonPath = path.join(packageRoot, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-  if (packageJson.crap4tsBinary !== descriptor.binaryPath) {
+  if (packageJson.crap4tsBinaries?.[target] !== descriptor.binaryPath) {
     throw new Error(
-      `${packageJsonPath} declares ${packageJson.crap4tsBinary || '<no crap4tsBinary>'}, expected ${descriptor.binaryPath}`,
+      `${packageJsonPath} declares ${packageJson.crap4tsBinaries?.[target] || '<no bundled binary>'}, expected ${descriptor.binaryPath}`,
     );
   }
   const sourcePath = path.resolve(source);

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
@@ -111,13 +112,13 @@ function pack(packageDirectory, outputDir) {
 function verifyNativePack(result, target, source) {
   const descriptor = targets[target];
   if (!descriptor) throw new Error(`unsupported target ${JSON.stringify(target)}`);
-  if (result.packageJson.name !== descriptor.packageName) {
+  if (result.packageJson.name !== '@crap4ts/crap4ts') {
     throw new Error(`${target} package metadata name is ${result.packageJson.name}`);
   }
-  if (result.packageJson.crap4tsBinary !== descriptor.binaryPath) {
+  if (result.packageJson.crap4tsBinaries?.[target] !== descriptor.binaryPath) {
     throw new Error(`${target} package binary declaration does not match target map`);
   }
-  const binaryPath = result.packageJson.crap4tsBinary;
+  const binaryPath = descriptor.binaryPath;
   const file = result.metadata.files.find((entry) => entry.path === binaryPath);
   if (!file) {
     throw new Error(`${result.packageJson.name} tarball does not contain ${binaryPath}`);
@@ -152,19 +153,15 @@ function verifyNativePack(result, target, source) {
 
 function verifyMetaPack(result, platform = process.platform) {
   if (result.packageJson.name !== '@crap4ts/crap4ts') {
-    throw new Error(`expected @crap4ts/crap4ts meta-package, received ${result.packageJson.name}`);
+    throw new Error(`expected @crap4ts/crap4ts bundled package, received ${result.packageJson.name}`);
   }
   const launcher = result.metadata.files.find((entry) => entry.path === 'bin/crap4ts.js');
   if (!launcher || (platform !== 'win32' && (launcher.mode & 0o111) === 0)) {
-    throw new Error('crap4ts meta-package tarball does not contain executable bin/crap4ts.js');
+    throw new Error('crap4ts bundled package tarball does not contain executable bin/crap4ts.js');
   }
-  const expectedTargets = Object.values(targets).map((descriptor) => descriptor.packageName).sort();
-  const actualTargets = Object.keys(result.packageJson.optionalDependencies || {}).sort();
-  if (JSON.stringify(actualTargets) !== JSON.stringify(expectedTargets)) {
-    throw new Error(
-      `crap4ts optional dependencies do not match target map: ${actualTargets.join(', ')}`,
-    );
-  }
+  const expected = Object.fromEntries(Object.entries(targets).map(([key, descriptor]) => [key, descriptor.binaryPath]));
+  assert.deepEqual(result.packageJson.crap4tsBinaries, expected, 'bundled binary mapping must match target map');
+  assert.equal(Object.keys(result.packageJson.optionalDependencies || {}).length, 0, 'bundled package must not use optional dependencies');
   return launcher;
 }
 
@@ -172,18 +169,20 @@ function packTargets(sources, outputDir, selectedTargets = Object.keys(targets))
   fs.mkdirSync(outputDir, { recursive: true });
   const staged = [];
   try {
-    const packages = selectedTargets.map((target) => {
+    for (const target of selectedTargets) {
       const source = sources[target];
       if (!source) throw new Error(`missing source binary for ${target}`);
       stage(target, source);
       staged.push(target);
-      const result = pack(targets[target].packageDirectory, outputDir);
-      verifyNativePack(result, target, source);
-      return result;
-    });
+    }
     const meta = pack('crap4ts', outputDir);
     verifyMetaPack(meta);
-    return { packages, meta };
+    assert.deepEqual(meta.metadata.files.map(({ path }) => path).sort(), [
+      'README.md', 'package.json', 'bin/crap4ts.js',
+      ...selectedTargets.map((target) => targets[target].binaryPath),
+    ].sort(), 'bundled tarball must contain exactly the selected binaries and launcher');
+    for (const target of selectedTargets) verifyNativePack(meta, target, sources[target]);
+    return { meta };
   } finally {
     for (const target of staged) removeStaged(target);
   }
@@ -201,7 +200,7 @@ function main() {
       : options.binary];
   }));
   const result = packTargets(sources, outputDir, selectedTargets);
-  process.stdout.write(`${[...result.packages, result.meta].map((entry) => entry.archive).join('\n')}\n`);
+  process.stdout.write(`${result.meta.archive}\n`);
 }
 
 if (require.main === module) {

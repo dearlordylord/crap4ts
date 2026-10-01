@@ -27,7 +27,6 @@ for (const target of REQUIRED_TARGETS) {
   if (target.startsWith('linux-')) assert.equal(descriptor.libc, 'glibc', `${target} must declare glibc libc`);
 }
 const META_PACKAGE_NAME = '@crap4ts/crap4ts';
-const packageNames = [...targetNames.map((target) => targets[target].packageName), META_PACKAGE_NAME];
 
 function usage() {
   return [
@@ -35,7 +34,7 @@ function usage() {
     '  node scripts/release.js assemble --binary-dir <dir> --output-dir <dir>',
     '  node scripts/release.js verify --release-dir <dir> [--require-smoke]',
     '',
-    'assemble creates five standalone tar.gz archives, six npm packages, and SHA256SUMS.',
+    'assemble creates five standalone tar.gz archives, one bundled npm package, and SHA256SUMS.',
     'verify checks the exact target/package/checksum set before publication.',
   ].join('\n');
 }
@@ -294,49 +293,25 @@ function findNpmArchive(directory, packageName, version) {
 
 function verifyNpmPackages(directory, version) {
   const packageDirectory = path.join(directory, 'npm');
-  ensureDirectory(packageDirectory);
-  const expectedFiles = packageNames.map((name) => findNpmArchive(packageDirectory, name, version)).sort();
-  const actualFiles = fs.readdirSync(packageDirectory)
-    .filter((name) => name.endsWith('.tgz'))
-    .map((name) => path.join(packageDirectory, name))
-    .sort();
-  assert.deepEqual(actualFiles, expectedFiles, 'npm package set is not exactly the five native packages plus meta-package');
-
-  const byName = new Map();
-  for (const archive of actualFiles) {
-    const metadata = packageJsonFromArchive(archive);
-    assert.equal(metadata.version, version, `${archive} version mismatch`);
-    assert.ok(packageNames.includes(metadata.name), `${archive} contains unexpected package ${metadata.name}`);
-    byName.set(metadata.name, { archive, metadata, entries: packageArchiveEntries(archive) });
-  }
-  assert.equal(byName.size, packageNames.length, 'npm package archives contain duplicate package identities');
+  const archive = findNpmArchive(packageDirectory, META_PACKAGE_NAME, version);
+  assert.deepEqual(fs.readdirSync(packageDirectory).filter((name) => name.endsWith('.tgz')).sort(), [path.basename(archive)], 'release must contain exactly one bundled npm package');
+  const metadata = packageJsonFromArchive(archive);
+  assert.equal(metadata.name, META_PACKAGE_NAME);
+  assert.equal(metadata.version, version);
+  assert.equal(Object.keys(metadata.optionalDependencies || {}).length, 0, 'bundled package must not use optional dependencies');
+  assert.deepEqual(metadata.crap4tsBinaries, Object.fromEntries(targetNames.map((target) => [target, targets[target].binaryPath])));
+  assertPackageArchive(archive, ['package/bin/crap4ts.js', 'package/package.json', 'package/README.md', ...targetNames.map((target) => `package/${targets[target].binaryPath}`)], 'package/bin/crap4ts.js');
   for (const target of targetNames) {
     const descriptor = targets[target];
-    const item = byName.get(descriptor.packageName);
-    assert.ok(item, `missing ${descriptor.packageName} archive`);
-    assert.ok(item.entries.includes(`package/${descriptor.binaryPath}`), `${descriptor.packageName} archive is missing ${descriptor.binaryPath}`);
-    assertPackageArchive(item.archive, ['package/package.json', 'package/README.md', `package/${descriptor.binaryPath}`], descriptor.os === 'win32' ? undefined : `package/${descriptor.binaryPath}`);
-    assert.deepEqual(item.metadata.os, [descriptor.os], `${descriptor.packageName} os metadata mismatch`);
-    assert.deepEqual(item.metadata.cpu, [descriptor.cpu], `${descriptor.packageName} cpu metadata mismatch`);
-    if (descriptor.libc) assert.deepEqual(item.metadata.libc, [descriptor.libc], `${descriptor.packageName} libc metadata mismatch`);
-    assert.equal(item.metadata.crap4tsBinary, descriptor.binaryPath, `${descriptor.packageName} binary mapping mismatch`);
-    const standalone = path.join(directory, versionedArchiveName(version, target));
+    if (descriptor.os !== 'win32') {
+      const listing = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8' });
+      const line = listing.split(/\r?\n/).find((entry) => entry.endsWith(` package/${descriptor.binaryPath}`));
+      assert.ok(line && /x/.test(line.slice(1, 10)), `${target} bundled binary must be executable`);
+    }
     const tarOptions = { maxBuffer: 256 * 1024 * 1024 };
-    const standaloneBytes = execFileSync('tar', ['-xOf', standalone, `crap4ts-${target}/${descriptor.binaryName}`], tarOptions);
-    const npmBytes = execFileSync('tar', ['-xOf', item.archive, `package/${descriptor.binaryPath}`], tarOptions);
-    assert.equal(hashFileBuffer(npmBytes), hashFileBuffer(standaloneBytes), `${target} standalone and npm binary payload differ`);
-  }
-  const meta = byName.get(META_PACKAGE_NAME);
-  assert.ok(meta, `missing ${META_PACKAGE_NAME} meta-package archive`);
-  assertPackageArchive(meta.archive, ['package/bin/crap4ts.js', 'package/package.json', 'package/README.md'], 'package/bin/crap4ts.js');
-  assert.ok(meta.entries.includes('package/bin/crap4ts.js'), 'meta-package archive is missing executable launcher');
-  assert.deepEqual(
-    Object.keys(meta.metadata.optionalDependencies || {}).sort(),
-    targetNames.map((target) => targets[target].packageName).sort(),
-    'meta-package optional dependencies do not cover exactly the target map',
-  );
-  for (const dependency of Object.values(meta.metadata.optionalDependencies || {})) {
-    assert.equal(dependency, version, 'meta-package optional dependency version mismatch');
+    const standaloneBytes = execFileSync('tar', ['-xOf', path.join(directory, versionedArchiveName(version, target)), `crap4ts-${target}/${descriptor.binaryName}`], tarOptions);
+    const npmBytes = execFileSync('tar', ['-xOf', archive, `package/${descriptor.binaryPath}`], tarOptions);
+    assert.equal(hashFileBuffer(npmBytes), hashFileBuffer(standaloneBytes), `${target} standalone and bundled npm binary payload differ`);
   }
 }
 

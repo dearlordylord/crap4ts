@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
-const { pack, verifyNativePack } = require('../../../scripts/pack-platform.js');
+const { pack, packTargets, removeStaged, verifyNativePack } = require('../../../scripts/pack-platform.js');
 const { stage, targets } = require('../../../scripts/stage-platform.js');
 const { npmInvocation } = require('../../../scripts/npm-command.js');
 const { platformDescriptor, supportedPlatformKeys } = require('../bin/crap4ts.js');
@@ -17,7 +17,7 @@ function runNpmExecutable(args, cwd = repositoryRoot) {
   // Each test is hermetic: packaging tests may remove their temporary staged
   // payload while node:test executes sibling tests concurrently.
   const hostTarget = `${process.platform}-${process.arch}`;
-  const hostBinary = path.join(repositoryRoot, 'target', 'debug', targets[hostTarget].binaryName);
+  const hostBinary = path.join(repositoryRoot, 'target', 'release', targets[hostTarget].binaryName);
   if (fs.existsSync(hostBinary)) stage(hostTarget, hostBinary);
   const npm = npmInvocation();
   return spawnSync(
@@ -38,7 +38,7 @@ function runNpmExecutable(args, cwd = repositoryRoot) {
 }
 
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crap4ts-npm-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crap4ts-npm-')));
   const sourcePath = path.join(root, 'src', 'fixture.ts');
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
   fs.writeFileSync(sourcePath, 'function greet(name: string) { return name; }\n');
@@ -84,14 +84,14 @@ test('npm executable forwards help output and exits successfully', () => {
   assert.match(result.stdout, /--coverage/);
 });
 
-test('launcher platform selection is derived from published optional dependencies', () => {
+test('launcher selects bundled binaries for all five platforms', () => {
   assert.deepEqual(supportedPlatformKeys().sort(), Object.keys(targets).sort());
   for (const [key, target] of Object.entries(targets)) {
     assert.deepEqual(platformDescriptor(key), {
-      packageName: target.packageName,
-      binaryName: target.binaryName,
+      binaryPath: target.binaryPath,
     });
   }
+  assert.equal(platformDescriptor('freebsd-x64'), undefined);
 });
 
 test('npm executable runs the minimal fixture and forwards gate status', () => {
@@ -150,22 +150,66 @@ test('Windows package accepts a mode-0644 executable payload', () => {
   const destination = path.join(
     repositoryRoot,
     'packages',
-    'crap4ts-win32-x64',
-    'bin',
-    'crap4ts.exe',
+    'crap4ts',
+    targets['win32-x64'].binaryPath,
   );
   try {
     const input = path.join(temporaryRoot, 'crap4ts.exe');
     fs.writeFileSync(input, 'windows executable fixture');
     fs.chmodSync(input, 0o644);
     stage('win32-x64', input);
-    const packed = pack('crap4ts-win32-x64', temporaryRoot);
+    const packed = pack('crap4ts', temporaryRoot);
     assert.doesNotThrow(() => verifyNativePack(packed, 'win32-x64'));
-    const payload = packed.metadata.files.find((entry) => entry.path === 'bin/crap4ts.exe');
+    const payload = packed.metadata.files.find((entry) => entry.path === targets['win32-x64'].binaryPath);
     assert.ok(payload);
     assert.equal(payload.mode & 0o111, 0);
   } finally {
     fs.rmSync(destination, { force: true });
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+// Releases are assembled on Linux, where POSIX executable modes can be verified.
+test('bundled tarball includes exactly all five distinct binary payloads', { skip: process.platform === 'win32' }, () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'crap4ts-bundle-'));
+  try {
+    const sources = Object.fromEntries(Object.keys(targets).map((key) => {
+      const input = path.join(temporaryRoot, key);
+      fs.writeFileSync(input, `distinct binary payload for ${key}`);
+      fs.chmodSync(input, key.startsWith('win32-') ? 0o644 : 0o755);
+      return [key, input];
+    }));
+    const output = path.join(temporaryRoot, 'packed');
+    const { meta } = packTargets(sources, output);
+    assert.deepEqual(fs.readdirSync(output), [path.basename(meta.archive)]);
+    assert.deepEqual(meta.metadata.files.map(({ path }) => path).sort(), [
+      'README.md', 'package.json', 'bin/crap4ts.js',
+      ...Object.values(targets).map(({ binaryPath }) => binaryPath),
+    ].sort());
+    for (const key of Object.keys(targets)) verifyNativePack(meta, key, sources[key]);
+    const version = require('../package.json').version;
+    const releaseDir = path.join(temporaryRoot, 'release');
+    fs.mkdirSync(path.join(releaseDir, 'npm'), { recursive: true });
+    fs.copyFileSync(meta.archive, path.join(releaseDir, 'npm', path.basename(meta.archive)));
+    for (const [key, descriptor] of Object.entries(targets)) {
+      const folder = `crap4ts-${key}`;
+      fs.mkdirSync(path.join(temporaryRoot, folder));
+      fs.copyFileSync(sources[key], path.join(temporaryRoot, folder, descriptor.binaryName));
+      const tar = spawnSync('tar', ['-czf', path.join(releaseDir, `crap4ts-${version}-${key}.tar.gz`), '-C', temporaryRoot, folder]);
+      assert.equal(tar.status, 0, tar.stderr?.toString());
+    }
+    const { verifyNpmPackages } = require('../../../scripts/release.js');
+    assert.doesNotThrow(() => verifyNpmPackages(releaseDir, version));
+    fs.writeFileSync(path.join(temporaryRoot, 'crap4ts-linux-arm64/crap4ts'), 'corrupted payload');
+    const tar = spawnSync('tar', ['-czf', path.join(releaseDir, `crap4ts-${version}-linux-arm64.tar.gz`), '-C', temporaryRoot, 'crap4ts-linux-arm64']);
+    assert.equal(tar.status, 0);
+    assert.throws(() => verifyNpmPackages(releaseDir, version), /linux-arm64 standalone and bundled npm binary payload differ/);
+    assert.throws(() => packTargets({ ...sources, 'linux-arm64': undefined }, output), /missing source binary for linux-arm64/);
+    for (const key of Object.keys(targets)) {
+      assert.equal(fs.existsSync(path.join(repositoryRoot, 'packages/crap4ts', targets[key].binaryPath)), false);
+    }
+  } finally {
+    for (const key of Object.keys(targets)) removeStaged(key);
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });

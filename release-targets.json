@@ -5,10 +5,10 @@
     "os": "linux",
     "cpu": "x64",
     "libc": "glibc",
-    "packageDirectory": "crap4ts-linux-x64",
-    "packageName": "@crap4ts/linux-x64",
+    "packageDirectory": "crap4ts",
+    "packageName": "@crap4ts/crap4ts",
     "binaryName": "crap4ts",
-    "binaryPath": "bin/crap4ts",
+    "binaryPath": "native/linux-x64/crap4ts",
     "archiveExtension": "tar.gz"
   },
   "linux-arm64": {
@@ -17,10 +17,10 @@
     "os": "linux",
     "cpu": "arm64",
     "libc": "glibc",
-    "packageDirectory": "crap4ts-linux-arm64",
-    "packageName": "@crap4ts/linux-arm64",
+    "packageDirectory": "crap4ts",
+    "packageName": "@crap4ts/crap4ts",
     "binaryName": "crap4ts",
-    "binaryPath": "bin/crap4ts",
+    "binaryPath": "native/linux-arm64/crap4ts",
     "archiveExtension": "tar.gz"
   },
   "darwin-x64": {
@@ -28,10 +28,10 @@
     "rustTarget": "x86_64-apple-darwin",
     "os": "darwin",
     "cpu": "x64",
-    "packageDirectory": "crap4ts-darwin-x64",
-    "packageName": "@crap4ts/darwin-x64",
+    "packageDirectory": "crap4ts",
+    "packageName": "@crap4ts/crap4ts",
     "binaryName": "crap4ts",
-    "binaryPath": "bin/crap4ts",
+    "binaryPath": "native/darwin-x64/crap4ts",
     "archiveExtension": "tar.gz"
   },
   "darwin-arm64": {
@@ -39,10 +39,10 @@
     "rustTarget": "aarch64-apple-darwin",
     "os": "darwin",
     "cpu": "arm64",
-    "packageDirectory": "crap4ts-darwin-arm64",
-    "packageName": "@crap4ts/darwin-arm64",
+    "packageDirectory": "crap4ts",
+    "packageName": "@crap4ts/crap4ts",
     "binaryName": "crap4ts",
-    "binaryPath": "bin/crap4ts",
+    "binaryPath": "native/darwin-arm64/crap4ts",
     "archiveExtension": "tar.gz"
   },
   "win32-x64": {
@@ -50,10 +50,10 @@
     "rustTarget": "x86_64-pc-windows-msvc",
     "os": "win32",
     "cpu": "x64",
-    "packageDirectory": "crap4ts-win32-x64",
-    "packageName": "@crap4ts/win32-x64",
+    "packageDirectory": "crap4ts",
+    "packageName": "@crap4ts/crap4ts",
     "binaryName": "crap4ts.exe",
-    "binaryPath": "bin/crap4ts.exe",
+    "binaryPath": "native/win32-x64/crap4ts.exe",
     "archiveExtension": "tar.gz"
   }
 }

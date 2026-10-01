@@ -88,7 +88,7 @@ jobs:
           sha256sum "$binary" | awk '{print $1 "  ${{ matrix.target }}"}' > "dist/binaries/${{ matrix.target }}.sha256"
       - name: Install npm smoke dependencies on Linux
         if: matrix.os == 'linux'
-        run: npm ci --force
+        run: npm ci
       - name: Linux glibc baseline and Debian 12 compatibility
         if: matrix.os == 'linux'
         shell: bash
@@ -137,7 +137,7 @@ jobs:
           node-version: '22.x'
           cache: npm
       - name: Install locked npm dependencies
-        run: npm ci --force
+        run: npm ci
       - name: Download every target binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -262,31 +262,7 @@ jobs:
               echo "skip identical release asset $name"
             fi
           done
-      - name: Publish native npm packages before meta-package
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(node -p "require('./package.json').version")
-          for target in $(node -e 'process.stdout.write(Object.keys(require("./release-targets.json")).sort().join(" "))'); do
-            package="dist/release/npm/crap4ts-${target}-${version}.tgz"
-            test -f "$package"
-            name=$(node -p "require('./packages/crap4ts-' + '$target' + '/package.json').name")
-            err=$(mktemp)
-            if ! url=$(npm view "$name@$version" dist.tarball --json 2>"$err"); then
-              grep -Eq 'E404|404 Not Found' "$err" || { cat "$err" >&2; exit 1; }
-              url=null
-            fi
-            if [ -z "$url" ] || [ "$url" = "null" ]; then
-              npm publish "$package" --access public --provenance
-            else
-              url=${url#\"}; url=${url%\"}
-              remote=$(mktemp)
-              curl --fail --location --silent --show-error "$url" -o "$remote"
-              cmp -s "$package" "$remote" || { echo "conflicting immutable npm package $name@$version" >&2; exit 1; }
-              echo "skip identical npm package $name@$version"
-            fi
-          done
-      - name: Publish npm meta-package last
+      - name: Publish bundled npm package
         shell: bash
         run: |
           set -euo pipefail

@@ -33,20 +33,16 @@ cargo build --workspace
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-npm ci --force
+npm ci
 npm test
 ```
-
-`--force` is limited to the workspace install because npm otherwise rejects
-the checked-in non-host native workspaces before applying their optional
-dependency filters. Published consumers do not need this flag.
 
 ## Packaging
 
 Linux releases build on Ubuntu 22.04 for both x64 and arm64, with a glibc 2.35
 baseline. CI and release jobs inspect the ELF version requirements and reject
 newer glibc dependencies. Before upload, the exact binary runs in Debian 12,
-and its packed npm launcher/native package is installed and exercised in a
+and its packed npm package with its bundled binaries is installed and exercised in a
 Debian 12 Node container. These checks cover version/help, Istanbul and LCOV
 analysis, and the threshold failure exit code. The same binaries then enter
 the existing checksum and publication gates.
@@ -61,11 +57,21 @@ node scripts/stage-platform.js --target linux-arm64 --binary target/release/crap
 npm run pack:npm -- --target linux-arm64 --binary target/release/crap4ts
 ```
 
-The staging command validates the target's declared `bin` path, and the pack
+The staging command validates the target's declared `native/<platform>` path, and the pack
 command fails unless the resulting tarball contains an executable payload. The
 clean host archive smoke is run by `npm test`; it builds release mode, packs
-the meta and host package, installs them in a temporary consumer, and invokes
+the package with the host binary, installs it in a temporary consumer, and invokes
 help plus fixture analysis.
+
+A full npm release bundles all five targets into one tarball:
+
+```sh
+npm run pack:npm -- --binary-dir dist/binaries
+```
+
+The `--target` form produces a host-only development tarball for smoke tests;
+the release verifier requires all five binaries and checks each payload against
+its standalone archive.
 
 ## Release
 
@@ -94,7 +100,7 @@ pnpm local-release
 
 That command creates the version tag, waits for GitHub Actions to cross-build
 all five targets, downloads and re-verifies the immutable artifacts, publishes
-the five native packages before `@crap4ts/crap4ts`, and finalizes the GitHub
+one `@crap4ts/crap4ts` package containing all five native binaries, and finalizes the GitHub
 release last. It is safe to retry: identical remote bytes are skipped and
 conflicting bytes stop the release. `pnpm local-release --check` performs only
 the read-only preflight.

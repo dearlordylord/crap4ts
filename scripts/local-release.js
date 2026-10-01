@@ -22,8 +22,7 @@ function packageTarballName(name, version) {
 }
 
 function npmPublicationPlan(version, releaseDirectory = 'dist/release') {
-  const names = Object.values(targets).map(({ packageName }) => packageName).sort();
-  names.push(META_PACKAGE_NAME);
+  const names = [META_PACKAGE_NAME];
   return names.map((name) => ({
     name,
     tarball: packageTarballName(name, version),

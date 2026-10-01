@@ -47,15 +47,11 @@ test('Cargo.lock package versions are independent of newline convention and unre
   );
 });
 
-test('public npm identities belong to the crap4ts organization', () => {
+test('single public npm package maps every bundled platform', () => {
   assert.equal(metaPackage.name, '@crap4ts/crap4ts');
   assert.deepEqual(metaPackage.bin, { crap4ts: 'bin/crap4ts.js' });
-  assert.deepEqual(
-    Object.keys(metaPackage.optionalDependencies).sort(),
-    Object.values(targets).map((target) => target.packageName).sort(),
-  );
-  assert.ok(
-    [metaPackage.name, ...Object.keys(metaPackage.optionalDependencies)]
-      .every((name) => name.startsWith('@crap4ts/')),
-  );
+  assert.equal(metaPackage.optionalDependencies, undefined);
+  assert.deepEqual(metaPackage.crap4tsBinaries, Object.fromEntries(
+    Object.entries(targets).map(([key, target]) => [key, target.binaryPath]),
+  ));
 });

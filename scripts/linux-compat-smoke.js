@@ -48,7 +48,7 @@ assert.ok(grouped.rows.length > 0);
 assert.ok(grouped.rows.every((row) => row.coverage.status === 'measured'));
 run(['--coverage', 'coverage-final.json', 'src', '--threshold', '0'], '/fixture/packages/istanbul', 2);
 
-// Install the packed npm launcher and native package on the same Debian baseline.
+// Install the packed npm package with its bundled host binary on the same Debian baseline.
 const npmImage = 'node:22-bookworm-slim';
 const npmPull = spawnSync('docker', ['pull', npmImage], { stdio: 'inherit' });
 assert.equal(npmPull.status, 0, npmPull.error?.message || 'could not pull Debian 12 Node image');

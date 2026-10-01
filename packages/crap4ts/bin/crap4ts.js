@@ -15,29 +15,17 @@ function platformKey() {
 }
 
 function supportedPlatformKeys(metadata = WRAPPER_METADATA) {
-  return Object.keys(metadata.optionalDependencies || {}).map((name) =>
-    name.replace(/^@crap4ts\//, ''),
-  );
+  return Object.keys(metadata.crap4tsBinaries || {});
 }
 
 function platformDescriptor(key, metadata = WRAPPER_METADATA) {
-  const packageName = `@crap4ts/${key}`;
-  if (!Object.hasOwn(metadata.optionalDependencies || {}, packageName)) return undefined;
-  return { packageName, binaryName: key.startsWith('win32-') ? 'crap4ts.exe' : 'crap4ts' };
+  const binaryPath = metadata.crap4tsBinaries?.[key];
+  return binaryPath ? { binaryPath } : undefined;
 }
 
 function fail(message) {
   process.stderr.write(`crap4ts: ${message}\n`);
   process.exitCode = 1;
-}
-
-function packageVersion(packageJsonPath) {
-  try {
-    const metadata = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-    return metadata.version;
-  } catch {
-    return undefined;
-  }
 }
 
 function signalExitCode(signal) {
@@ -57,40 +45,18 @@ function main() {
     return;
   }
 
-  const packageJsonRequest = `${selected.packageName}/package.json`;
-  let packageJsonPath;
-  try {
-    packageJsonPath = require.resolve(packageJsonRequest, { paths: [__dirname] });
-  } catch {
-    fail(
-      `platform package ${selected.packageName}@${packageVersion(
-        path.resolve(__dirname, '..', 'package.json'),
-      ) || 'the installed version'} is missing for ${key}. Reinstall crap4ts with optional dependencies enabled.`,
-    );
-    return;
-  }
-
-  const wrapperVersion = packageVersion(path.resolve(__dirname, '..', 'package.json'));
-  const binaryVersion = packageVersion(packageJsonPath);
-  if (wrapperVersion && binaryVersion && wrapperVersion !== binaryVersion) {
-    fail(
-      `version mismatch: npm wrapper is ${wrapperVersion}, but ${selected.packageName} is ${binaryVersion}. Install matching crap4ts packages.`,
-    );
-    return;
-  }
-
-  const binaryPath = path.join(path.dirname(packageJsonPath), 'bin', selected.binaryName);
+  const binaryPath = path.resolve(__dirname, '..', selected.binaryPath);
   let binaryStats;
   try {
     binaryStats = fs.statSync(binaryPath);
   } catch {
     fail(
-      `platform package ${selected.packageName} is installed but its binary is missing at ${binaryPath}. Reinstall the package or build crap4ts with Cargo.`,
+      `bundled binary for ${key} is missing at ${binaryPath}. Reinstall the package or build crap4ts with Cargo.`,
     );
     return;
   }
   if (!binaryStats.isFile()) {
-    fail(`platform package ${selected.packageName} has an invalid binary at ${binaryPath}.`);
+    fail(`bundled binary for ${key} is invalid at ${binaryPath}.`);
     return;
   }
   if (process.platform !== 'win32') {
@@ -98,7 +64,7 @@ function main() {
       fs.accessSync(binaryPath, fs.constants.X_OK);
     } catch {
       fail(
-        `platform package ${selected.packageName} contains a non-executable binary at ${binaryPath}. Reinstall the package.`,
+        `bundled binary for ${key} is not executable at ${binaryPath}. Reinstall the package.`,
       );
       return;
     }

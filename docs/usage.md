@@ -254,16 +254,15 @@ numeric score.
 
 ## Platforms and limitations
 
-Keep npm optional dependencies enabled: the launcher needs the matching native
-package. A missing package or unsupported platform produces an actionable error.
+The npm package bundles all five native binaries. A missing binary or
+unsupported platform produces an actionable error.
 Unsupported platforms can build the standalone binary from source; see
 [development instructions](./how-its-made.md#development).
 
-The npm package is a launcher plus one optional native package selected by
-Node's `process.platform` and `process.arch`; it performs no postinstall
-download. Supported npm targets are Linux x64/arm64, macOS x64/arm64, and
-Windows x64. Optional dependencies must remain enabled for normal npm
-installation. The npm wrapper requires Node `>=20.19.0 <25` (Node 20, 22, or
+The launcher selects its bundled binary using Node's `process.platform` and
+`process.arch`; it performs no postinstall download and needs no optional
+dependencies. Supported npm targets are Linux x64/arm64, macOS x64/arm64, and
+Windows x64. Every npm installation downloads binaries for all five targets. The npm wrapper requires Node `>=20.19.0 <25` (Node 20, 22, or
 24 LTS). The CLI analyzes TypeScript/TSX only; JavaScript, raw V8 coverage,
 source-map reconstruction, SARIF/HTML, baseline ratchets, and changed-lines
 gates are outside v1.
@@ -285,7 +284,7 @@ crap4ts-1.0.0-win32-x64.tar.gz
 Each archive contains the native executable, `LICENSE`, and this README.
 `SHA256SUMS` covers exactly those five standalone archives plus the trusted
 `BINARY-SHA256SUMS` record (six entries total). The npm directory contains
-`npm/NPM-SHA256SUMS` for the six npm tarballs;
+`npm/NPM-SHA256SUMS` for the single bundled npm tarball;
 verify it before extracting an archive:
 
 ```sh
