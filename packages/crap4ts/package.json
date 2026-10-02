@@ -1,6 +1,6 @@
 {
   "name": "@crap4ts/crap4ts",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "CRAP metric quality gate for TypeScript and TSX using complexity and test coverage",
   "keywords": [
     "typescript",
