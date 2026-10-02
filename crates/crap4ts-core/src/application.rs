@@ -172,14 +172,15 @@ pub fn analyze_with_adapter_and_policy(
         coverage_adapter.validate_for_source(&source_file.path, &source_file.source)?;
     }
     let mut diagnostics = coverage_adapter.validate_attribution(&units, sources)?;
+    let measurements = coverage_adapter.coverage_for_all(&units, sources)?;
+    if measurements.len() != units.len() {
+        return Err(CoreError::CoverageAttribution(
+            "coverage adapter returned an inconsistent measurement count".to_string(),
+        ));
+    }
 
     let mut rows = Vec::with_capacity(units.len());
-    for unit in &units {
-        let source = sources
-            .iter()
-            .find(|source| source.path == unit.path)
-            .map_or("", |source| source.source.as_str());
-        let measured = coverage_adapter.coverage_for(&unit.path, unit, source, &units)?;
+    for (unit, measured) in units.iter().zip(measurements) {
         let coverage = measured.unwrap_or_else(|| {
             Coverage::unknown("no matching coverage function or statement evidence")
         });

@@ -684,6 +684,65 @@ mod tests {
     }
 
     #[test]
+    fn bulk_istanbul_queries_preserve_individual_results_after_source_reordering() {
+        let first = SourceFile {
+            path: ProjectRelativePath::new("first.ts").unwrap(),
+            source: "const outer = () => { const inner = () => 1; return inner; };".to_string(),
+        };
+        let second = SourceFile {
+            path: ProjectRelativePath::new("second.ts").unwrap(),
+            source: "function other() { return 2; }".to_string(),
+        };
+        let sources = [first, second];
+        let mut artifact = serde_json::Map::new();
+        for source in &sources {
+            let units = super::source::analyze_source(&source.path, &source.source).unwrap();
+            let mut functions = serde_json::Map::new();
+            let mut counts = serde_json::Map::new();
+            for (index, unit) in units.iter().enumerate() {
+                functions.insert(index.to_string(), json!({"name": unit.name, "loc": istanbul_range(&source.source, unit.body_range)}));
+                counts.insert(index.to_string(), json!(u64::from(unit.name != "outer")));
+            }
+            artifact.insert(
+                source.path.to_string(),
+                json!({"fnMap": functions, "f": counts}),
+            );
+        }
+        let adapter = make_coverage_adapter(
+            CoverageFormat::Istanbul,
+            &serde_json::to_string(&artifact).unwrap(),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        for ordered in [sources.clone(), [sources[1].clone(), sources[0].clone()]] {
+            let units = ordered
+                .iter()
+                .flat_map(|source| {
+                    super::source::analyze_source(&source.path, &source.source).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let bulk = adapter.coverage_for_all(&units, &ordered).unwrap();
+            assert_eq!(bulk.len(), units.len());
+            for (unit, result) in units.iter().zip(bulk) {
+                let source = ordered
+                    .iter()
+                    .find(|source| source.path == unit.path)
+                    .unwrap();
+                assert_eq!(
+                    result,
+                    adapter
+                        .coverage_for(&unit.path, unit, &source.source, &units)
+                        .unwrap()
+                );
+                assert_eq!(
+                    result,
+                    Some(Coverage::measured(u64::from(unit.name != "outer"), 1).unwrap())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nested_anonymous_vitest_envelopes_use_decl_to_select_the_child() {
         let source = "const smellCounter = (values: number[]) => {\n  return values.map((value) => {\n    return value + 1;\n  });\n};\n";
         let path = ProjectRelativePath::new("smell-counter.ts").unwrap();

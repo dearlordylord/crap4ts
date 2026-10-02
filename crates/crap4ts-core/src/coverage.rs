@@ -88,6 +88,25 @@ pub trait CoverageAdapter {
         source: &str,
         units: &[FunctionUnit],
     ) -> Result<Option<Coverage>, CoreError>;
+
+    /// Resolve an analysis in bulk. Adapters may share file attribution across
+    /// functions; the default preserves independent adapter implementations.
+    fn coverage_for_all(
+        &self,
+        units: &[FunctionUnit],
+        sources: &[SourceFile],
+    ) -> Result<Vec<Option<Coverage>>, CoreError> {
+        units
+            .iter()
+            .map(|unit| {
+                let source = sources
+                    .iter()
+                    .find(|source| source.path == unit.path)
+                    .map_or("", |source| source.source.as_str());
+                self.coverage_for(&unit.path, unit, source, units)
+            })
+            .collect()
+    }
 }
 
 /// Parse an artifact using the selected format and construct the normalized
@@ -284,6 +303,32 @@ impl CoverageAdapter for IstanbulCoverage {
         units: &[FunctionUnit],
     ) -> Result<Option<Coverage>, CoreError> {
         IstanbulCoverage::coverage_for(self, path, unit, source, units)
+    }
+
+    fn coverage_for_all(
+        &self,
+        units: &[FunctionUnit],
+        sources: &[SourceFile],
+    ) -> Result<Vec<Option<Coverage>>, CoreError> {
+        let mut measured = vec![None; units.len()];
+        for (path, file) in &self.files {
+            if !units.iter().any(|unit| unit.path == *path) {
+                continue;
+            }
+            let source = sources
+                .iter()
+                .find(|source| source.path == *path)
+                .map_or("", |source| source.source.as_str());
+            let (attribution, _) = file.attribute(path, source, units)?;
+            for (index, _) in units
+                .iter()
+                .enumerate()
+                .filter(|(_, unit)| unit.path == *path)
+            {
+                measured[index] = file.coverage_for_attributed(index, &attribution)?;
+            }
+        }
+        Ok(measured)
     }
 }
 
@@ -488,6 +533,14 @@ impl IstanbulFile {
                     unit.id
                 ))
             })?;
+        self.coverage_for_attributed(unit_index, &attribution)
+    }
+
+    fn coverage_for_attributed(
+        &self,
+        unit_index: usize,
+        attribution: &IstanbulAttribution,
+    ) -> Result<Option<Coverage>, CoreError> {
         let owned = attribution
             .statement_owners
             .iter()
