@@ -331,7 +331,9 @@ impl IstanbulFile {
             let mut candidates = source_units
                 .iter()
                 .filter_map(|(unit_index, unit)| {
-                    let exact = coverage_range == unit.body_range || coverage_range == unit.range;
+                    let exact = coverage_range == unit.body_range
+                        || coverage_range == unit.range
+                        || body_location_with_delimiters(coverage_range, unit.body_range, source);
                     let location_compatible = range_compatible(coverage_range, unit.range, source)
                         || range_compatible(coverage_range, unit.body_range, source);
                     let named_overlap = !function.name.is_empty()
@@ -342,6 +344,13 @@ impl IstanbulFile {
                     (exact || named_overlap || anonymous_location).then_some((*unit_index, exact))
                 })
                 .collect::<Vec<_>>();
+
+            // Resolve exact body locations before consulting declarations.
+            // Source-map remapping can place a callback's declaration at its
+            // enclosing call's method name, outside the callback itself.
+            if candidates.iter().any(|(_, exact)| *exact) {
+                candidates.retain(|(_, exact)| *exact);
+            }
 
             // Istanbul labels anonymous functions numerically, so the name
             // cannot distinguish a nested arrow from its enclosing arrow.
@@ -382,10 +391,6 @@ impl IstanbulFile {
                 }
             }
 
-            let has_exact = candidates.iter().any(|(_, exact)| *exact);
-            if has_exact {
-                candidates.retain(|(_, exact)| *exact);
-            }
             let Some((owner, _)) = most_specific_unit(&candidates, units)? else {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticCategory::CoverageAttribution,
@@ -508,14 +513,20 @@ impl IstanbulFile {
 /// Match Istanbul's declaration range without assuming its start is the
 /// exact Oxc function span. Constructors can include indentation, decorators,
 /// or a method key before the span Oxc reports. A declaration start inside a
-/// source function is the strongest signal; otherwise a declaration envelope
-/// around the complete source function is accepted as a weaker signal.
+/// source function's start or a short prefix around that start is stronger
+/// than merely lying somewhere inside an enclosing function's body.
 fn declaration_compatibility(declaration: SourceRange, unit: SourceRange) -> Option<u8> {
-    if range_contains(unit, declaration) {
-        Some(2)
+    if declaration.start == unit.start && declaration.end.offset <= unit.end.offset {
+        Some(3)
     } else if declaration.start.offset <= unit.start.offset
         && declaration.end.offset >= unit.start.offset
     {
+        Some(if declaration.end.offset < unit.end.offset {
+            2
+        } else {
+            0
+        })
+    } else if range_contains(unit, declaration) {
         Some(1)
     } else {
         None
@@ -598,6 +609,31 @@ fn range_is_strictly_inside(inner: SourceRange, outer: SourceRange) -> bool {
     outer.start.offset <= inner.start.offset
         && inner.end.offset <= outer.end.offset
         && (outer.start.offset < inner.start.offset || inner.end.offset < outer.end.offset)
+}
+
+/// Remapped expression bodies can include parentheses around an object or a
+/// call's trailing comma. Only same-line syntactic wrappers retain the body's
+/// identity; containing a body somewhere is not sufficient.
+fn body_location_with_delimiters(coverage: SourceRange, body: SourceRange, source: &str) -> bool {
+    coverage.start.line == body.start.line
+        && coverage.end.line == body.end.line
+        && source
+            .get(
+                coverage.start.offset.min(body.start.offset)
+                    ..coverage.start.offset.max(body.start.offset),
+            )
+            .is_some_and(|prefix| {
+                prefix
+                    .chars()
+                    .all(|character| character.is_whitespace() || character == '(')
+            })
+        && source
+            .get(body.end.offset.min(coverage.end.offset)..body.end.offset.max(coverage.end.offset))
+            .is_some_and(|suffix| {
+                suffix.chars().all(|character| {
+                    character.is_whitespace() || matches!(character, ';' | ',' | ')' | ']' | '}')
+                })
+            })
 }
 
 /// Istanbul commonly represents an end column as null, meaning the end of

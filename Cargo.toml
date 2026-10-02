@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "1.0.4"
+version = "1.0.5"
 rust-version = "1.94"
 
 [workspace.dependencies]

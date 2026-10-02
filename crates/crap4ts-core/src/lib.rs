@@ -553,6 +553,137 @@ mod tests {
     }
 
     #[test]
+    fn exact_callback_bodies_take_priority_over_remapped_declarations() {
+        let source = "const outer = (values: number[]) => {\n  const sorted = values.sort((a, b) => a - b);\n  return sorted.reduce((sum, value) => sum + value, 0);\n};\n";
+        let path = ProjectRelativePath::new("callbacks.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        assert_eq!(units.len(), 3);
+        let parent = units.iter().find(|unit| unit.name == "outer").unwrap();
+        let sort = units
+            .iter()
+            .find(|unit| unit.body_range.start.line == 2)
+            .unwrap();
+        let reduce = units
+            .iter()
+            .find(|unit| unit.body_range.start.line == 3)
+            .unwrap();
+        // Vitest's remapped declaration starts at the call's method name,
+        // outside the callback, while its body location is exact.
+        for suffix in [0, 2] {
+            let reduce_location = json!({
+                "start": istanbul_position(source, reduce.body_range.start),
+                "end": position(reduce.body_range.end.line, reduce.body_range.end.column + suffix)
+            });
+            let coverage = json!({
+                "callbacks.ts": {
+                    "fnMap": {
+                        "0": {"name": "(anonymous_0)", "loc": istanbul_range(source, parent.body_range), "decl": istanbul_range(source, parent.range)},
+                        "1": {"name": "(anonymous_1)", "loc": istanbul_range(source, sort.body_range), "decl": {"start": position(2, 24), "end": position(2, 28)}},
+                        "2": {"name": "(anonymous_2)", "loc": reduce_location, "decl": {"start": position(3, 16), "end": position(3, 22)}}
+                    },
+                    "f": {"0": 0, "1": 7, "2": 0}
+                }
+            });
+            let report = analyze(
+                &[SourceFile {
+                    path: path.clone(),
+                    source: source.to_string(),
+                }],
+                &serde_json::to_string(&coverage).unwrap(),
+                8,
+                false,
+            )
+            .unwrap();
+            assert!(report.diagnostics.is_empty());
+            for (unit, hits) in [(parent, 0), (sort, 1), (reduce, 0)] {
+                let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+                assert_eq!(row.coverage, Coverage::measured(hits, 1).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn parenthesized_object_callback_body_beats_enclosing_declaration() {
+        let source =
+            "const outer = () => {\n  const empty = () => ({ value: 1 });\n  return empty;\n};\n";
+        let path = ProjectRelativePath::new("object-callback.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let parent = units.iter().find(|unit| unit.name == "outer").unwrap();
+        let child = units.iter().find(|unit| unit.name == "empty").unwrap();
+        for start in [
+            child.body_range.start.column - 1,
+            child.body_range.start.column + 1,
+        ] {
+            let coverage = json!({
+                "object-callback.ts": {
+                    "fnMap": {
+                        "0": {"name": "(anonymous_0)", "loc": istanbul_range(source, parent.body_range), "decl": istanbul_range(source, parent.range)},
+                        "1": {"name": "(anonymous_1)", "decl": {"start": position(2, 8), "end": position(2, 13)}, "loc": {
+                            "start": position(child.body_range.start.line, start),
+                            "end": {"line": child.body_range.end.line, "column": null}
+                        }}
+                    },
+                    "f": {"0": 1, "1": 0}
+                }
+            });
+            let report = analyze(
+                &[SourceFile {
+                    path: path.clone(),
+                    source: source.to_string(),
+                }],
+                &serde_json::to_string(&coverage).unwrap(),
+                8,
+                false,
+            )
+            .unwrap();
+            assert!(report.diagnostics.is_empty());
+            for (unit, hits) in [(parent, 1), (child, 0)] {
+                let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+                assert_eq!(row.coverage, Coverage::measured(hits, 1).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn callback_declaration_prefix_beats_incidental_parent_containment() {
+        let source = "const outer = (values: number[]) => {\n  return values.some((x) => (x > 0 && x < 2));\n};\n";
+        let path = ProjectRelativePath::new("prefix-callback.ts").unwrap();
+        let units = super::source::analyze_source(&path, source).unwrap();
+        let parent = units.iter().find(|unit| unit.name == "outer").unwrap();
+        let child = units.iter().find(|unit| unit.id != parent.id).unwrap();
+        let coverage = json!({
+            "prefix-callback.ts": {
+                "fnMap": {
+                    "0": {"name": "(anonymous_0)", "loc": istanbul_range(source, parent.body_range), "decl": istanbul_range(source, parent.range)},
+                    "1": {"name": "(anonymous_1)", "decl": {
+                        "start": position(child.range.start.line, child.range.start.column - 5),
+                        "end": position(child.range.start.line, child.range.start.column + 1)
+                    }, "loc": {
+                        "start": position(child.range.start.line, child.range.start.column + 1),
+                        "end": istanbul_position(source, child.range.end)
+                    }}
+                },
+                "f": {"0": 0, "1": 1}
+            }
+        });
+        let report = analyze(
+            &[SourceFile {
+                path,
+                source: source.to_string(),
+            }],
+            &serde_json::to_string(&coverage).unwrap(),
+            8,
+            false,
+        )
+        .unwrap();
+        assert!(report.diagnostics.is_empty());
+        for (unit, hits) in [(parent, 0), (child, 1)] {
+            let row = report.rows.iter().find(|row| row.id == unit.id).unwrap();
+            assert_eq!(row.coverage, Coverage::measured(hits, 1).unwrap());
+        }
+    }
+
+    #[test]
     fn nested_anonymous_vitest_envelopes_use_decl_to_select_the_child() {
         let source = "const smellCounter = (values: number[]) => {\n  return values.map((value) => {\n    return value + 1;\n  });\n};\n";
         let path = ProjectRelativePath::new("smell-counter.ts").unwrap();
