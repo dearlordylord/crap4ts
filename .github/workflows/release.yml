@@ -156,7 +156,9 @@ jobs:
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           base_ref=origin/master
           test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
-          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse "$base_ref^{commit}")"
+          release_head=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          test "$release_head" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$release_head" "$base_ref"
           npm run check:versions -- --tag "$RELEASE_TAG"
       - name: Assemble standalone archives, npm packages, and checksums
         run: node scripts/release.js assemble --binary-dir dist/binaries --output-dir dist/release
@@ -212,6 +214,8 @@ jobs:
           test "$(npm --version)" = "11.5.1"
           npm config set registry https://registry.npmjs.org --location=user
           test -z "$(npm config get //registry.npmjs.org/:_authToken 2>/dev/null || true)"
+      - name: Install locked publication-gate dependencies
+        run: npm ci --ignore-scripts
       - name: Download verified release directory
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
