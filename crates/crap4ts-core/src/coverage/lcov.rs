@@ -1,6 +1,6 @@
-//! LCOV line-coverage adapter.
+//! LCOV line and branch coverage adapter.
 //!
-//! LCOV deliberately remains line based here. It has no source columns and
+//! Attribution remains line based. LCOV has no source columns and
 //! its optional function records do not describe function end ranges, so a
 //! line can be assigned only when the normalized source ranges make ownership
 //! unambiguous. Guessing between same-line functions would turn unavailable
@@ -13,15 +13,16 @@ use std::{
 };
 
 use crate::domain::{
-    CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionUnit, ProjectRelativePath,
-    SourceFile, SourceRange,
+    CoreError, Coverage, CoverageBasis, Diagnostic, DiagnosticCategory, FunctionUnit,
+    ProjectRelativePath, SourceFile, SourceRange,
 };
 
-use super::CoverageAdapter;
+use super::{CoverageAdapter, CoverageMetric};
 
 #[derive(Debug)]
 pub(super) struct LcovCoverage {
     files: BTreeMap<ProjectRelativePath, LcovFile>,
+    metric: CoverageMetric,
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +30,9 @@ struct LcovFile {
     /// LCOV's `DA` records are the normalized line evidence. The key is the
     /// one-based source line and the value is its execution count.
     lines: BTreeMap<usize, u64>,
+    branches: BTreeMap<(usize, String, String), u64>,
+    branches_found: Option<u64>,
+    branches_hit: Option<u64>,
     function_lines: Vec<(usize, String)>,
     function_hits: Vec<(u64, String)>,
     function_found: Option<u64>,
@@ -42,13 +46,18 @@ struct LcovAttribution {
     /// Hits indexed by the global source-unit index supplied by the
     /// application. A unit with no entry has no measurable LCOV evidence.
     unit_hits: BTreeMap<usize, Vec<u64>>,
+    branch_hits: BTreeMap<usize, Vec<u64>>,
     /// Units touched by an ambiguous line are explicitly blocked from
     /// becoming measured by another, unrelated line.
     ambiguous_units: BTreeSet<usize>,
 }
 
 impl LcovCoverage {
-    pub(super) fn parse(input: &str, root: &Path) -> Result<Self, CoreError> {
+    pub(super) fn parse_with_metric(
+        input: &str,
+        root: &Path,
+        metric: CoverageMetric,
+    ) -> Result<Self, CoreError> {
         let mut files = BTreeMap::new();
         let mut current: Option<(String, LcovFile)> = None;
 
@@ -158,10 +167,43 @@ impl LcovCoverage {
                 "BRDA" => {
                     parse_branch_record(value, line_number)?;
                     require_record(&current, line_number, "BRDA")?;
+                    let fields = value.split(',').collect::<Vec<_>>();
+                    let key = (
+                        parse_positive_line(fields[0], "BRDA line", line_number)?,
+                        fields[1].to_string(),
+                        fields[2].to_string(),
+                    );
+                    let hits = if fields[3] == "-" {
+                        0
+                    } else {
+                        parse_count(fields[3], "BRDA taken", line_number)?
+                    };
+                    if current
+                        .as_mut()
+                        .unwrap()
+                        .1
+                        .branches
+                        .insert(key, hits)
+                        .is_some()
+                    {
+                        return Err(parsing_error(line_number, "duplicate BRDA branch record"));
+                    }
                 }
                 "BRF" | "BRH" => {
-                    parse_count(value, tag, line_number)?;
+                    let count = parse_count(value, tag, line_number)?;
                     require_record(&current, line_number, tag)?;
+                    let file = &mut current.as_mut().unwrap().1;
+                    let slot = if tag == "BRF" {
+                        &mut file.branches_found
+                    } else {
+                        &mut file.branches_hit
+                    };
+                    if slot.replace(count).is_some() {
+                        return Err(parsing_error(
+                            line_number,
+                            format!("duplicate {tag} summary record"),
+                        ));
+                    }
                 }
                 _ => {
                     return Err(parsing_error(
@@ -178,7 +220,7 @@ impl LcovCoverage {
                 "LCOV record is missing end_of_record",
             ));
         }
-        Ok(Self { files })
+        Ok(Self { files, metric })
     }
 
     pub(super) fn validate_for_source(
@@ -190,7 +232,13 @@ impl LcovCoverage {
             return Ok(());
         };
         let line_count = source_line_count(source);
-        if let Some(line) = file.lines.keys().find(|line| **line > line_count) {
+        if let Some(line) = file
+            .lines
+            .keys()
+            .copied()
+            .chain(file.branches.keys().map(|(line, _, _)| *line))
+            .find(|line| *line > line_count)
+        {
             return Err(CoreError::CoverageParsing(format!(
                 "LCOV line {line} for '{path}' is outside the source ({line_count} lines)"
             )));
@@ -212,7 +260,7 @@ impl LcovCoverage {
                 .iter()
                 .find(|source| source.path == *path)
                 .map_or("", |source| source.source.as_str());
-            let (_, file_diagnostics) = file.attribute(path, source, units)?;
+            let (_, file_diagnostics) = file.attribute(path, source, units, self.metric)?;
             diagnostics.extend(file_diagnostics);
         }
         Ok(diagnostics)
@@ -228,7 +276,7 @@ impl LcovCoverage {
         let Some(file) = self.files.get(path) else {
             return Ok(None);
         };
-        let (attribution, _) = file.attribute(path, source, units)?;
+        let (attribution, _) = file.attribute(path, source, units, self.metric)?;
         let unit_index = units
             .iter()
             .position(|candidate| candidate.id == unit.id)
@@ -241,16 +289,35 @@ impl LcovCoverage {
         if attribution.ambiguous_units.contains(&unit_index) {
             return Ok(None);
         }
-        let Some(hits) = attribution.unit_hits.get(&unit_index) else {
+        let (hits, basis) = if self.metric == CoverageMetric::Branch {
+            if let Some(hits) = attribution.branch_hits.get(&unit_index) {
+                (Some(hits), CoverageBasis::Branch)
+            } else {
+                (attribution.unit_hits.get(&unit_index), CoverageBasis::Line)
+            }
+        } else {
+            (attribution.unit_hits.get(&unit_index), CoverageBasis::Line)
+        };
+        let Some(hits) = hits else {
             return Ok(None);
         };
         let total = hits.len() as u64;
         let covered = hits.iter().filter(|hits| **hits > 0).count() as u64;
-        Coverage::measured(covered, total).map(Some)
+        Coverage::measured(covered, total).map(|coverage| {
+            Some(if self.metric == CoverageMetric::Branch {
+                coverage.with_basis(basis)
+            } else {
+                coverage
+            })
+        })
     }
 }
 
 impl CoverageAdapter for LcovCoverage {
+    fn uses_branch_metric(&self) -> bool {
+        self.metric == CoverageMetric::Branch
+    }
+
     fn validate_for_source(
         &self,
         path: &ProjectRelativePath,
@@ -280,6 +347,17 @@ impl CoverageAdapter for LcovCoverage {
 
 impl LcovFile {
     fn validate_summaries(&self, path: &ProjectRelativePath) -> Result<(), CoreError> {
+        if self
+            .branches_found
+            .is_some_and(|found| found != self.branches.len() as u64)
+            || self.branches_hit.is_some_and(|hit| {
+                hit != self.branches.values().filter(|hits| **hits > 0).count() as u64
+            })
+        {
+            return Err(CoreError::CoverageParsing(format!(
+                "LCOV branch summary for '{path}' does not match BRDA records"
+            )));
+        }
         let function_count = self.function_lines.len() as u64;
         if self
             .function_found
@@ -349,6 +427,7 @@ impl LcovFile {
         path: &ProjectRelativePath,
         source: &str,
         units: &[FunctionUnit],
+        metric: CoverageMetric,
     ) -> Result<(LcovAttribution, Vec<Diagnostic>), CoreError> {
         let source_units = units
             .iter()
@@ -357,29 +436,45 @@ impl LcovFile {
             .collect::<Vec<_>>();
         let mut attribution = LcovAttribution {
             unit_hits: BTreeMap::new(),
+            branch_hits: BTreeMap::new(),
             ambiguous_units: BTreeSet::new(),
         };
         let mut diagnostics = Vec::new();
 
-        for (line, hits) in &self.lines {
+        let records = self
+            .lines
+            .iter()
+            .map(|(line, hits)| (*line, *hits, false))
+            .chain(
+                self.branches
+                    .iter()
+                    .filter(|_| metric == CoverageMetric::Branch)
+                    .map(|((line, _, _), hits)| (*line, *hits, true)),
+            );
+        for (line, hits, branch) in records {
             let candidates = source_units
                 .iter()
                 // LCOV DA records identify source lines, so include the full
                 // normalized function range (including a multiline
                 // signature) when looking for an owner. Nested-body
                 // exclusivity is still decided from body ranges below.
-                .filter(|(_, unit)| line_in_range(*line, unit.range))
+                .filter(|(_, unit)| line_in_range(line, unit.range))
                 .map(|(index, _)| *index)
                 .collect::<Vec<_>>();
-            match line_owner(*line, &candidates, units, source) {
+            match line_owner(line, &candidates, units, source) {
                 LineOwner::Unique(owner) => {
-                    attribution.unit_hits.entry(owner).or_default().push(*hits);
+                    let target = if branch {
+                        &mut attribution.branch_hits
+                    } else {
+                        &mut attribution.unit_hits
+                    };
+                    target.entry(owner).or_default().push(hits);
                 }
                 LineOwner::Ambiguous => {
                     attribution
                         .ambiguous_units
                         .extend(candidates.iter().copied());
-                    diagnostics.push(ambiguous_line_diagnostic(path, *line, &candidates, units));
+                    diagnostics.push(ambiguous_line_diagnostic(path, line, &candidates, units));
                 }
                 LineOwner::None => {
                     diagnostics.push(Diagnostic::new(

@@ -4,6 +4,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { validateReport } = require('./validate-report.js');
 
@@ -15,9 +16,9 @@ function readJson(file) {
 
 function sample(version) {
   const row = {
-    id: version === 2 ? 'group::src/file.ts::fn' : 'src/file.ts::fn',
-    ...(version === 2 ? { group: 'group' } : {}),
-    path: version === 2 ? 'packages/group/src/file.ts' : 'src/file.ts',
+    id: version % 2 === 0 ? 'group::src/file.ts::fn' : 'src/file.ts::fn',
+    ...(version % 2 === 0 ? { group: 'group' } : {}),
+    path: version % 2 === 0 ? 'packages/group/src/file.ts' : 'src/file.ts',
     name: 'fn',
     kind: 'function_declaration',
     range: {
@@ -28,7 +29,7 @@ function sample(version) {
     coverage: { status: 'measured', covered: 1, total: 1, fraction: 1 },
     crap: 1,
   };
-  return version === 2
+  return version % 2 === 0
     ? {
         version,
         rows: [row],
@@ -39,12 +40,21 @@ function sample(version) {
 }
 
 function validateSchemaDocuments() {
-  for (const version of [1, 2]) {
+  for (const version of [1, 2, 3, 4]) {
     const file = path.join(root, 'schemas', `report-v${version}.schema.json`);
     const schema = readJson(file);
     assert.equal(schema.type, 'object', `${file} must describe an object`);
     assert.equal(schema.properties.version.const, version, `${file} version mismatch`);
-    validateReport(sample(version), version);
+    const document = sample(version);
+    if (version >= 3) {
+      document.rows[0].label = 'GET /users';
+      document.rows[0].coverage.basis = 'branch';
+    }
+    validateReport(document, version);
+    if (version < 3) {
+      document.rows[0].coverage.basis = 'branch';
+      assert.throws(() => validateReport(document, version));
+    }
   }
 }
 
@@ -67,6 +77,26 @@ function validateBinary(binary) {
     throw new Error(`schema smoke failed: ${result.error?.message || result.stderr}`);
   }
   validateReport(JSON.parse(result.stdout), 2);
+  const branched = spawnSync(executable, ['--coverage', 'coverage-final.json', 'src', '--format', 'json', '--coverage-metric', 'branch'], {
+    cwd: path.join(fixture, 'packages', 'istanbul'), encoding: 'utf8',
+  });
+  assert.equal(branched.status, 0, branched.stderr);
+  validateReport(JSON.parse(branched.stdout), 3);
+
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'crap4ts-schemas-'));
+  try {
+    fs.cpSync(fixture, temporary, { recursive: true });
+    const configPath = path.join(temporary, 'crap4ts.json');
+    const config = readJson(configPath);
+    for (const group of Object.values(config.groups)) group.coverage_metric = 'branch';
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    const aggregate = spawnSync(executable, ['--json'], { cwd: temporary, encoding: 'utf8' });
+    assert.equal(aggregate.status, 0, aggregate.stderr);
+    validateReport(JSON.parse(aggregate.stdout), 4);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+
 }
 
 function main() {
@@ -77,7 +107,7 @@ function main() {
     if (!binary) throw new Error('--binary requires a path');
     validateBinary(binary);
   }
-  process.stdout.write('validated JSON report schemas v1 and v2\n');
+  process.stdout.write('validated JSON report schemas v1, v2, v3, and v4\n');
 }
 
 if (require.main === module) {

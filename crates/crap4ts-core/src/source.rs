@@ -1,6 +1,9 @@
 //! Oxc-backed TypeScript source analysis.
 
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
@@ -37,12 +40,16 @@ pub fn analyze_source(
         });
     }
 
+    let mut bindings = ExpressBindings::default();
+    bindings.visit_program(&parsed.program);
+    bindings.resolve();
     let starts = line_starts(source);
     let mut collector = FunctionCollector {
         path,
         starts: &starts,
         contexts: Vec::new(),
         units: Vec::new(),
+        route_receivers: bindings.receivers,
     };
     collector.visit_program(&parsed.program);
     collector.units.sort_by(|left, right| {
@@ -53,6 +60,16 @@ pub fn analyze_source(
             .then_with(|| left.range.end.offset.cmp(&right.range.end.offset))
             .then_with(|| left.name.cmp(&right.name))
     });
+    let mut labels = BTreeMap::<String, usize>::new();
+    for unit in &mut collector.units {
+        if let Some(label) = &mut unit.label {
+            let number = labels.entry(label.clone()).or_default();
+            *number += 1;
+            if *number > 1 {
+                *label = format!("{label}#{number}");
+            }
+        }
+    }
     Ok(collector.units)
 }
 
@@ -89,6 +106,7 @@ struct FunctionCollector<'path, 'source> {
     starts: &'source [usize],
     contexts: Vec<FunctionContext>,
     units: Vec<FunctionUnit>,
+    route_receivers: BTreeSet<String>,
 }
 
 /// Context inferred from the construct that owns a function-like expression.
@@ -103,11 +121,17 @@ struct FunctionContext {
     span: Span,
     kind: Option<FunctionKind>,
     name: Option<String>,
+    label: Option<String>,
 }
 
 impl FunctionContext {
     fn new(span: Span, kind: Option<FunctionKind>, name: Option<String>) -> Self {
-        Self { span, kind, name }
+        Self {
+            span,
+            kind,
+            name,
+            label: None,
+        }
     }
 }
 
@@ -160,6 +184,7 @@ impl<'path, 'source> FunctionCollector<'path, 'source> {
             id,
             path: self.path.clone(),
             name: display_name,
+            label: self.context_for(span).and_then(|context| context.label),
             kind,
             range,
             body_range,
@@ -201,6 +226,22 @@ impl<'ast, 'path, 'source> Visit<'ast> for FunctionCollector<'path, 'source> {
             &function.body,
         ));
         walk::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'ast>) {
+        let label = route_label(call, &self.route_receivers);
+        let count_before = self.contexts.len();
+        if let Some(label) = label {
+            for argument in &call.arguments {
+                if let Some((span, _)) = argument.as_expression().and_then(function_like) {
+                    let mut context = FunctionContext::new(span, None, None);
+                    context.label = Some(label.clone());
+                    self.contexts.push(context);
+                }
+            }
+        }
+        walk::walk_call_expression(self, call);
+        self.contexts.truncate(count_before);
     }
 
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'ast>) {
@@ -336,6 +377,179 @@ impl<'ast, 'path, 'source> Visit<'ast> for FunctionCollector<'path, 'source> {
     }
 }
 
+/// Recognize imported Express factories and their direct local instances.
+/// Duplicate or assigned identifiers are excluded to avoid guessing through
+/// shadowing and mutation. This affects display names only, never attribution.
+#[derive(Default)]
+struct ExpressBindings {
+    factories: BTreeSet<String>,
+    routers: BTreeSet<String>,
+    initializers: Vec<(String, String, bool)>,
+    counts: BTreeMap<String, usize>,
+    assigned: BTreeSet<String>,
+    receivers: BTreeSet<String>,
+}
+
+impl ExpressBindings {
+    fn resolve(&mut self) {
+        let valid =
+            |name: &String| self.counts.get(name) == Some(&1) && !self.assigned.contains(name);
+        self.factories.retain(valid);
+        self.routers.retain(valid);
+        for (name, factory, member) in &self.initializers {
+            if valid(name)
+                && (self.factories.contains(factory) || (!member && self.routers.contains(factory)))
+            {
+                self.receivers.insert(name.clone());
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ExpressBindings {
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'ast>) {
+        *self.counts.entry(identifier.name.to_string()).or_default() += 1;
+    }
+
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'ast>) {
+        if declaration.source.value == "express"
+            && declaration.import_kind == ImportOrExportKind::Value
+        {
+            if let Some(specifiers) = &declaration.specifiers {
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                            self.factories.insert(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                            self.factories.insert(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if specifier.import_kind == ImportOrExportKind::Value
+                                && specifier.imported.name() == "Router" =>
+                        {
+                            self.routers.insert(specifier.local.name.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'ast>) {
+        if let Some(name) = expression.left.get_identifier_name() {
+            self.assigned.insert(name.to_string());
+        }
+        walk::walk_assignment_expression(self, expression);
+    }
+
+    fn visit_variable_declarator(&mut self, declaration: &VariableDeclarator<'ast>) {
+        if let (Some(name), Some(Expression::CallExpression(call))) = (
+            binding_name(&declaration.id),
+            declaration
+                .init
+                .as_ref()
+                .map(Expression::get_inner_expression),
+        ) {
+            match call.callee.get_inner_expression() {
+                Expression::Identifier(factory) => {
+                    if factory.name == "require"
+                        && call
+                            .arguments
+                            .first()
+                            .and_then(Argument::as_expression)
+                            .and_then(static_string)
+                            .as_deref()
+                            == Some("express")
+                    {
+                        self.factories.insert(name);
+                    } else {
+                        self.initializers
+                            .push((name, factory.name.to_string(), false));
+                    }
+                }
+                Expression::StaticMemberExpression(member) if member.property.name == "Router" => {
+                    if let Expression::Identifier(factory) = member.object.get_inner_expression() {
+                        self.initializers
+                            .push((name, factory.name.to_string(), true));
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk::walk_variable_declarator(self, declaration);
+    }
+}
+
+fn static_string(expression: &Expression<'_>) -> Option<String> {
+    match expression.get_inner_expression() {
+        Expression::StringLiteral(value) => Some(value.value.to_string()),
+        Expression::TemplateLiteral(value) if value.expressions.is_empty() => value
+            .quasis
+            .first()
+            .and_then(|quasi| quasi.value.cooked.map(|value| value.to_string())),
+        _ => None,
+    }
+}
+
+fn route_receiver(
+    expression: &Expression<'_>,
+    receivers: &BTreeSet<String>,
+) -> Option<Option<String>> {
+    match expression.get_inner_expression() {
+        Expression::Identifier(identifier) if receivers.contains(identifier.name.as_str()) => {
+            Some(None)
+        }
+        Expression::CallExpression(call) => {
+            let Expression::StaticMemberExpression(member) = call.callee.get_inner_expression()
+            else {
+                return None;
+            };
+            let inherited = route_receiver(&member.object, receivers)?;
+            if member.property.name == "route" {
+                Some(
+                    call.arguments
+                        .first()
+                        .and_then(Argument::as_expression)
+                        .and_then(static_string),
+                )
+            } else if route_method(member.property.name.as_str()) {
+                Some(inherited)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn route_method(name: &str) -> bool {
+    matches!(
+        name,
+        "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "all" | "use"
+    )
+}
+
+fn route_label(call: &CallExpression<'_>, receivers: &BTreeSet<String>) -> Option<String> {
+    let Expression::StaticMemberExpression(member) = call.callee.get_inner_expression() else {
+        return None;
+    };
+    if !route_method(member.property.name.as_str()) {
+        return None;
+    }
+    let inherited = route_receiver(&member.object, receivers)?;
+    let path = call
+        .arguments
+        .first()
+        .and_then(Argument::as_expression)
+        .and_then(static_string)
+        .or(inherited);
+    let method = member.property.name.to_uppercase();
+    Some(path.map_or(method.clone(), |path| format!("{method} {path}")))
+}
+
 fn function_kind(function: &Function<'_>, flags: ScopeFlags) -> FunctionKind {
     if flags.is_constructor() {
         FunctionKind::Constructor
@@ -464,10 +678,115 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
         walk::walk_logical_expression(self, expression);
     }
 
+    fn visit_static_member_expression(&mut self, expression: &StaticMemberExpression<'ast>) {
+        self.value += u32::from(expression.optional);
+        walk::walk_static_member_expression(self, expression);
+    }
+
+    fn visit_computed_member_expression(&mut self, expression: &ComputedMemberExpression<'ast>) {
+        self.value += u32::from(expression.optional);
+        walk::walk_computed_member_expression(self, expression);
+    }
+
+    fn visit_private_field_expression(&mut self, expression: &PrivateFieldExpression<'ast>) {
+        self.value += u32::from(expression.optional);
+        walk::walk_private_field_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'ast>) {
+        self.value += u32::from(expression.optional);
+        walk::walk_call_expression(self, expression);
+    }
+
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'ast>) {
         if expression.operator != AssignmentOperator::Assign && expression.operator.is_logical() {
             self.value += 1;
         }
         walk::walk_assignment_expression(self, expression);
+    }
+}
+
+#[cfg(test)]
+mod addition_tests {
+    use super::*;
+
+    fn units(source: &str) -> Vec<FunctionUnit> {
+        analyze_source(&ProjectRelativePath::new("routes.ts").unwrap(), source).unwrap()
+    }
+
+    #[test]
+    fn optional_segments_are_decisions_without_double_counting_or_nested_leakage() {
+        let found = units(
+            "function outer(v: any) { const child = () => v?.a?.[0]?.(); return v?.b ?? v.c; }",
+        );
+        assert_eq!(found[0].complexity.get(), 3);
+        assert_eq!(found[1].complexity.get(), 4);
+        let found = units("class C { #value = 1; read(v: C | undefined) { return v?.#value; } }");
+        assert_eq!(found[0].complexity.get(), 2);
+    }
+
+    #[test]
+    fn express_labels_preserve_names_identity_and_independent_complexity() {
+        let source = r#"import express, { Router as createRouter } from 'express';
+const app = express();
+const router = createRouter();
+function setup() {
+  app.get('/users', (req) => req?.user, function named(req) { if(req) return 1; });
+  router.route(`/items`).post((req) => req).get((req) => req);
+  app.use((req) => req);
+  app.get('/users', (req) => req);
+  const unrelated = new Map(); unrelated.get('key', () => 1);
+}
+"#;
+        let found = units(source);
+        let labels = found
+            .iter()
+            .filter_map(|unit| unit.label.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "GET /users",
+                "GET /users#2",
+                "POST /items",
+                "GET /items",
+                "USE",
+                "GET /users#3"
+            ]
+        );
+        assert_eq!(
+            found
+                .iter()
+                .find(|unit| unit.name == "setup")
+                .unwrap()
+                .complexity
+                .get(),
+            1
+        );
+        let named = found.iter().find(|unit| unit.name == "named").unwrap();
+        assert!(named.id.contains("::named@"));
+        assert_eq!(named.label.as_deref(), Some("GET /users#2"));
+        assert_eq!(named.complexity.get(), 2);
+        assert!(found.last().unwrap().label.is_none());
+    }
+
+    #[test]
+    fn chained_callbacks_are_numbered_in_source_order_and_dynamic_paths_stay_literal_free() {
+        let found = units("import express from 'express'; const app = express(); app.route('/x').get(() => 1).get(() => 2); app.post(`/items/${id}`, () => 1);");
+        let labels = found
+            .iter()
+            .filter_map(|unit| unit.label.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["GET /x", "GET /x#2", "POST"]);
+    }
+
+    #[test]
+    fn commonjs_routes_and_shadowed_or_reassigned_receivers_are_conservative() {
+        let found = units("const express = require('express'); const app = express(); const router = express.Router(); router.get('/x', () => 1); app.get('/y', () => 1);");
+        assert_eq!(found.iter().filter(|unit| unit.label.is_some()).count(), 2);
+        let found = units("import express from 'express'; const app = express(); function f(app: any) { app.get('/x', () => 1); } app.get('/y', () => 1);");
+        assert!(found.iter().all(|unit| unit.label.is_none()));
+        let found = units("import express from 'express'; let app = express(); app = other; app.get('/x', () => 1);");
+        assert!(found.iter().all(|unit| unit.label.is_none()));
     }
 }

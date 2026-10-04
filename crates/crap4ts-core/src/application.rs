@@ -182,7 +182,7 @@ pub fn analyze_with_adapter_and_policy(
     let mut rows = Vec::with_capacity(units.len());
     for (unit, measured) in units.iter().zip(measurements) {
         let coverage = measured.unwrap_or_else(|| {
-            Coverage::unknown("no matching coverage function or statement evidence")
+            Coverage::unknown("no matching coverage function, statement, line, or branch evidence")
         });
         if let Coverage::Unknown { reason } = &coverage {
             diagnostics.push(Diagnostic::new(
@@ -210,6 +210,7 @@ pub fn analyze_with_adapter_and_policy(
             group: None,
             path: unit.path.clone(),
             name: unit.name.clone(),
+            label: unit.label.clone(),
             kind: unit.kind,
             range: unit.range,
             body_range: unit.body_range,
@@ -242,7 +243,15 @@ pub fn analyze_with_adapter_and_policy(
             .then_with(|| left.message.cmp(&right.message))
     });
     Ok(Report {
-        version: crate::domain::REPORT_VERSION,
+        version: if coverage_adapter.uses_branch_metric()
+            || rows.iter().any(|row| {
+                row.label.is_some()
+                    || matches!(row.coverage, Coverage::Measured { basis: Some(_), .. })
+            }) {
+            crate::domain::EXTENDED_REPORT_VERSION
+        } else {
+            crate::domain::REPORT_VERSION
+        },
         threshold: Some(policy.global()),
         rows,
         diagnostics,
@@ -286,6 +295,13 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, Cor
         }
     }
 
+    let extended = packages.iter().any(|package| {
+        package.report.version == crate::domain::EXTENDED_REPORT_VERSION
+            || package.report.rows.iter().any(|row| {
+                row.label.is_some()
+                    || matches!(row.coverage, Coverage::Measured { basis: Some(_), .. })
+            })
+    });
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
     let mut groups = Vec::with_capacity(packages.len());
@@ -343,7 +359,11 @@ pub fn aggregate_reports(mut packages: Vec<PackageReport>) -> Result<Report, Cor
     rows.sort_by(compare_rows);
     diagnostics.sort_by(compare_diagnostics);
     Ok(Report {
-        version: crate::domain::AGGREGATE_REPORT_VERSION,
+        version: if extended {
+            crate::domain::EXTENDED_AGGREGATE_REPORT_VERSION
+        } else {
+            crate::domain::AGGREGATE_REPORT_VERSION
+        },
         threshold: None,
         rows,
         diagnostics,
@@ -453,6 +473,7 @@ mod tests {
             group: None,
             path,
             name: "f".to_string(),
+            label: None,
             kind: crate::domain::FunctionKind::FunctionDeclaration,
             range,
             body_range: range,

@@ -731,7 +731,7 @@ fn issue_three_tsx_fixture_reports_all_units_and_complexity() {
     assert_row("value", "getter", 1);
     assert_row("value", "setter", 1);
     assert_row("field", "arrow", 1);
-    assert_row("decisions", "function_declaration", 18);
+    assert_row("decisions", "function_declaration", 19);
     assert_row("asynchronous", "function_declaration", 1);
     assert_row("generator", "function_declaration", 1);
     assert_row("overloaded", "function_declaration", 1);
@@ -1672,4 +1672,320 @@ fn existing_artifact_mode_never_runs_configured_command_or_cleans_artifact() {
         original
     );
     assert!(output.stderr.is_empty());
+}
+
+fn git_fixture(root: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn init_git(root: &std::path::Path) {
+    git_fixture(root, &["init", "-q"]);
+    git_fixture(root, &["config", "user.email", "tests@example.invalid"]);
+    git_fixture(root, &["config", "user.name", "Fixture"]);
+    git_fixture(root, &["add", "."]);
+    git_fixture(root, &["commit", "-qm", "base"]);
+}
+
+#[test]
+fn branch_metric_changes_gate_reports_basis_and_cli_overrides_config() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/fixture.ts"),
+        "function choose(v: boolean) {\n  return v ? 1 : 0;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("coverage.info"),
+        "SF:src/fixture.ts\nDA:2,1\nBRDA:2,0,0,1\nBRDA:2,0,1,0\nend_of_record\n",
+    )
+    .unwrap();
+    fs::write(fixture.root.join("crap4ts.json"), serde_json::to_vec(&json!({
+        "sources":["src"],"coverage":{"path":"coverage.info","format":"lcov","metric":"branch"},"threshold":2,"format":"json"
+    })).unwrap()).unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["version"], 3);
+    assert_eq!(report["rows"][0]["coverage"]["basis"], "branch");
+    assert_eq!(report["rows"][0]["crap"], 2.5);
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--coverage-metric", "legacy"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["version"], 1);
+    assert!(report["rows"][0]["coverage"].get("basis").is_none());
+    for config in [
+        json!({"coverage_metric":"nonsense"}),
+        json!({"coverage_metric":null}),
+        json!({"coverage":{"path":"x","metric":"branch"},"coverage_metric":"legacy"}),
+    ] {
+        fs::write(fixture.root.join("crap4ts.json"), config.to_string()).unwrap();
+        let output = Command::new(binary())
+            .current_dir(&fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn changed_selection_handles_staged_unstaged_untracked_deleted_and_committed_files() {
+    let fixture = Fixture::new();
+    for name in ["staged", "unstaged", "deleted", "untouched", "committed"] {
+        fs::write(
+            fixture.root.join(format!("src/{name}.ts")),
+            format!("function {name}() {{ return 1; }}\n"),
+        )
+        .unwrap();
+    }
+    init_git(&fixture.root);
+    let base = git_fixture(&fixture.root, &["rev-parse", "HEAD"]);
+    fs::write(
+        fixture.root.join("src/committed.ts"),
+        "function committed() { return 2; }\n",
+    )
+    .unwrap();
+    git_fixture(&fixture.root, &["add", "src/committed.ts"]);
+    git_fixture(&fixture.root, &["commit", "-qm", "committed change"]);
+    fs::write(
+        fixture.root.join("src/staged.ts"),
+        "function staged() { return 2; }\n",
+    )
+    .unwrap();
+    git_fixture(&fixture.root, &["add", "src/staged.ts"]);
+    fs::write(
+        fixture.root.join("src/unstaged.ts"),
+        "function unstaged() { return 2; }\n",
+    )
+    .unwrap();
+    fs::remove_file(fixture.root.join("src/deleted.ts")).unwrap();
+    fs::write(
+        fixture.root.join("src/new ü space.ts"),
+        "function fresh() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("outside.ts"),
+        "function outside() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("src/ignored.test.ts"),
+        "function test() {}\n",
+    )
+    .unwrap();
+    let report_for = |args: &[&str]| {
+        let output = run_with_source(&fixture, args, &["src"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let report = report_for(&["--changed", "--report-only", "--json"]);
+    let names = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names, ["fresh", "staged", "unstaged"].into_iter().collect());
+    let report = report_for(&["--changed-since", &base, "--report-only", "--json"]);
+    let names = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        ["committed", "fresh", "staged", "unstaged"]
+            .into_iter()
+            .collect()
+    );
+    let output = run_with_source(
+        &fixture,
+        &["--changed-since", "no-such-ref", "--json"],
+        &["src"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn no_changed_sources_skip_generation_and_leave_coverage_artifact_intact() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("crap4ts.json"), json!({"sources":["src"],"coverage":{"path":"coverage-final.json","command":["no-such-program"]},"format":"json"}).to_string()).unwrap();
+    init_git(&fixture.root);
+    let before = fs::read(fixture.root.join("coverage-final.json")).unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--changed")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["rows"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fs::read(fixture.root.join("coverage-final.json")).unwrap(),
+        before
+    );
+    fs::write(fixture.root.join("crap4ts.json"), json!({"sources":["src"],"coverage":{"path":"../outside.json","command":["no-such-program"]}}).to_string()).unwrap();
+    let invalid = Command::new(binary())
+        .current_dir(&fixture.root)
+        .arg("--changed")
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("unsafe coverage artifact path"));
+    let output = run(&fixture, &["--changed-since", "HEAD", "--changed"]);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn changed_selection_requires_git_and_missing_coverage_still_fails() {
+    let fixture = Fixture::new();
+    let output = run(&fixture, &["--changed", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    init_git(&fixture.root);
+    fs::write(
+        fixture.root.join("src/new.ts"),
+        "function newlyAdded() { return 1; }\n",
+    )
+    .unwrap();
+    let output = run_with_source(&fixture, &["--changed", "--json"], &["src"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing_evidence"));
+}
+
+#[test]
+fn groups_allow_independent_branch_metrics_and_changed_selection() {
+    let fixture = MixedFixture::new();
+    fixture.config(mixed_groups_config());
+    let config_path = fixture.root.join("crap4ts.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["groups"]["lcov"]["coverage_metric"] = json!("branch");
+    fs::write(&config_path, config.to_string()).unwrap();
+    init_git(&fixture.root);
+    let source = fixture.root.join("packages/lcov/src/fixture.ts");
+    let text = fs::read_to_string(&source).unwrap();
+    fs::write(&source, format!("{text}// changed\n")).unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--changed", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["version"], 4);
+    assert_eq!(report["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(report["rows"][0]["group"], "lcov");
+    assert_eq!(report["rows"][0]["coverage"]["basis"], "line");
+    assert_eq!(report["groups"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn deleting_all_sources_is_a_valid_empty_changed_selection() {
+    let fixture = Fixture::new();
+    init_git(&fixture.root);
+    fs::remove_file(fixture.root.join("src/fixture.ts")).unwrap();
+    let output = run_with_source(&fixture, &["--changed", "--json"], &["src"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["rows"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn changed_selection_matches_canonical_project_roots_inside_git_repositories() {
+    let fixture = Fixture::new();
+    init_git(&fixture.root);
+    let file = fixture.root.join("src/fixture.ts");
+    let content = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("{content}// change\n")).unwrap();
+    fs::write(
+        fixture.root.join("outside.ts"),
+        "function outside() { return 0; }\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args([
+            "--project-root",
+            fixture.root.join("src").to_str().unwrap(),
+            "--coverage",
+            fixture.root.join("coverage-final.json").to_str().unwrap(),
+            "--changed",
+            "--json",
+            ".",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(report["rows"][0]["path"], "fixture.ts");
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_file_aliases_match_the_source_discoverys_canonical_identity() {
+    let fixture = Fixture::new();
+    init_git(&fixture.root);
+    std::os::unix::fs::symlink("fixture.ts", fixture.root.join("src/alias.ts")).unwrap();
+    let output = run_with_source(&fixture, &["--changed", "--json"], &["src"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }

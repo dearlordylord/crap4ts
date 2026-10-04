@@ -3,14 +3,16 @@
 Inspired by Robert C. Martin (Uncle Bob)'s
 [crap4java](https://github.com/unclebob/crap4java) and
 [crap4clj](https://github.com/unclebob/crap4clj), adapted for TypeScript and TSX.
+His later [crapper](https://github.com/unclebob/crapper) solution calculates
+CRAP scores for several languages, including TypeScript.
 
 Find complex, poorly tested TypeScript functions and fail CI when their risk
 exceeds your limit. crap4ts combines cyclomatic complexity and test coverage
 into a per-function CRAP (Change Risk Anti-Patterns) score.
 
 It analyzes TypeScript/TSX with Istanbul JSON or LCOV coverage and produces
-text or JSON reports. Supports per-file thresholds and independent monorepo
-package groups.
+text or JSON reports. Supports per-file thresholds, independent monorepo
+package groups, optional branch scoring, Express route labels, and Git change selection.
 
 ## Quick start
 
@@ -28,6 +30,8 @@ For LCOV or JSON output:
 ```sh
 npx crap4ts --coverage coverage/lcov.info --coverage-format lcov src
 npx crap4ts --coverage coverage/coverage-final.json src --format json --threshold 12
+npx crap4ts --coverage coverage/coverage-final.json src --coverage-metric branch
+npx crap4ts --coverage coverage/coverage-final.json src --changed-since main
 ```
 
 ## Using crap4ts in an agent workflow

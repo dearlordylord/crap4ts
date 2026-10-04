@@ -1,6 +1,6 @@
 {
   "name": "crap4ts-workspace",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "private": true,
   "description": "Development workspace for the crap4ts Rust CLI and npm distribution",
   "license": "MIT",

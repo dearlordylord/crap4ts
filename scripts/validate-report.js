@@ -8,7 +8,7 @@ const Ajv2020 = require('ajv/dist/2020');
 
 const root = path.resolve(__dirname, '..');
 const ajv = new Ajv2020({ allErrors: true, strict: true });
-const validators = new Map([1, 2].map((version) => {
+const validators = new Map([1, 2, 3, 4].map((version) => {
   const schema = JSON.parse(fs.readFileSync(path.join(root, 'schemas', `report-v${version}.schema.json`), 'utf8'));
   return [version, ajv.compile(schema)];
 }));

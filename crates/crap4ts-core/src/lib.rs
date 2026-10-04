@@ -16,11 +16,15 @@ pub use application::{
     analyze_with_policy, analyze_with_root, analyze_with_root_and_format, crap_score,
     validate_sources, PackageReport, ThresholdPolicy,
 };
-pub use coverage::{coverage_adapter, make_coverage_adapter, CoverageAdapter, CoverageFormat};
+pub use coverage::{
+    coverage_adapter, make_coverage_adapter, make_coverage_adapter_with_metric, CoverageAdapter,
+    CoverageFormat, CoverageMetric,
+};
 pub use domain::{
-    Complexity, CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionKind, FunctionUnit,
-    GroupName, GroupRoot, ProjectRelativePath, Report, ReportGroup, ReportRow, SourceFile,
-    SourcePosition, SourceRange, AGGREGATE_REPORT_VERSION, REPORT_VERSION,
+    Complexity, CoreError, Coverage, CoverageBasis, Diagnostic, DiagnosticCategory, FunctionKind,
+    FunctionUnit, GroupName, GroupRoot, ProjectRelativePath, Report, ReportGroup, ReportRow,
+    SourceFile, SourcePosition, SourceRange, AGGREGATE_REPORT_VERSION,
+    EXTENDED_AGGREGATE_REPORT_VERSION, EXTENDED_REPORT_VERSION, REPORT_VERSION,
 };
 pub use path::{collect_sources, collect_sources_with_options, SourceSelectionOptions};
 pub use report::{render_json, render_text};

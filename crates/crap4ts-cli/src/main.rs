@@ -1,3 +1,4 @@
+mod changed;
 mod config;
 mod generation;
 
@@ -13,9 +14,9 @@ use clap::{error::ErrorKind, ArgAction, Parser};
 use config::{ConfigValues, OutputFormat, DEFAULT_THRESHOLD};
 use crap4ts_core::{
     aggregate_reports, analyze_with_adapter_and_policy, collect_sources_with_options,
-    make_coverage_adapter, render_json, render_text, validate_sources, CoverageAdapter,
-    CoverageFormat, Diagnostic, DiagnosticCategory, GroupName, GroupRoot, PackageReport,
-    ProjectRelativePath, SourceFile, ThresholdPolicy,
+    make_coverage_adapter_with_metric, render_json, render_text, validate_sources, CoverageAdapter,
+    CoverageFormat, CoverageMetric, Diagnostic, DiagnosticCategory, GroupName, GroupRoot,
+    PackageReport, ProjectRelativePath, SourceFile, ThresholdPolicy,
 };
 
 #[derive(Debug, Parser)]
@@ -44,6 +45,18 @@ struct Cli {
     /// Coverage artifact format. Configuration may provide this value.
     #[arg(long = "coverage-format", value_name = "FORMAT")]
     coverage_format: Option<CoverageFormat>,
+
+    /// Prefer branch coverage, reporting the evidence used for each fallback.
+    #[arg(long = "coverage-metric", value_name = "METRIC")]
+    coverage_metric: Option<CoverageMetric>,
+
+    /// Analyze staged, unstaged, and untracked source files.
+    #[arg(long)]
+    changed: bool,
+
+    /// Analyze files differing from this commit, including working-tree changes.
+    #[arg(long = "changed-since", value_name = "REF", conflicts_with = "changed")]
+    changed_since: Option<String>,
 
     /// Program to run to generate fresh coverage. Repeat --coverage-arg for
     /// arguments; the command is executed directly without a shell.
@@ -238,6 +251,10 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
                 .to_string()
         })?;
     let command = resolved_coverage_command(cli, values)?;
+    if let Some(command) = &command {
+        generation::validate_command(command).map_err(CliFailure::from)?;
+        generation::validate_artifact_path(root, &coverage).map_err(CliFailure::from)?;
+    }
     let mut requested = if cli.source_paths.is_empty() && cli.source_options.is_empty() {
         values.sources.clone().unwrap_or_default()
     } else {
@@ -246,14 +263,18 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
     if !(cli.source_paths.is_empty() && cli.source_options.is_empty()) {
         requested.extend(cli.source_options.iter().cloned());
     }
-    let sources = collect_sources_with_options(root, &requested, values.source_selection)
+    let mut sources = collect_sources_with_options(root, &requested, values.source_selection)
         .map_err(|error| error.to_string())?;
-    if sources.is_empty() {
+    if sources.is_empty() && !cli.changed && cli.changed_since.is_none() {
         return Err(
             "configuration: source selection produced no TypeScript files"
                 .to_string()
                 .into(),
         );
+    }
+
+    if let Some(paths) = changed::selected(root, cli.changed, cli.changed_since.as_deref())? {
+        sources.retain(|source| paths.contains(&root.join(source.path.as_str())));
     }
 
     let format = resolved_format(cli, values);
@@ -274,7 +295,9 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
     };
     let policy = config::policy(values, threshold);
 
-    let coverage = if let Some(command) = command {
+    let coverage = if sources.is_empty() {
+        String::new()
+    } else if let Some(command) = command {
         generation::generate(root, &coverage, &command).map_err(CliFailure::from)?
     } else {
         let coverage_path = if coverage.is_absolute() {
@@ -289,11 +312,22 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             )
         })?
     };
-    let adapter =
-        make_coverage_adapter(coverage_format, &coverage, root).map_err(|error| CliFailure {
-            message: error.to_string(),
-            diagnostics: error.diagnostics().to_vec(),
-        })?;
+    let adapter = make_coverage_adapter_with_metric(
+        if sources.is_empty() {
+            CoverageFormat::Istanbul
+        } else {
+            coverage_format
+        },
+        if sources.is_empty() { "{}" } else { &coverage },
+        root,
+        cli.coverage_metric
+            .or(values.coverage_metric)
+            .unwrap_or_default(),
+    )
+    .map_err(|error| CliFailure {
+        message: error.to_string(),
+        diagnostics: error.diagnostics().to_vec(),
+    })?;
     let report = analyze_with_adapter_and_policy(&sources, adapter.as_ref(), &policy, report_only)
         .map_err(|error| CliFailure {
             message: error.to_string(),
@@ -327,6 +361,7 @@ struct ResolvedPackageGroup {
     sources: Vec<SourceFile>,
     artifact: PathBuf,
     coverage_format: CoverageFormat,
+    coverage_metric: CoverageMetric,
     command: Option<Vec<String>>,
     policy: ThresholdPolicy,
     report_only: bool,
@@ -342,6 +377,7 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
         .as_ref()
         .expect("group branch checked by execute");
 
+    let changed_paths = changed::selected(root, cli.changed, cli.changed_since.as_deref())?;
     let mut resolved = Vec::with_capacity(groups.len());
     let mut selected_files = BTreeMap::<String, String>::new();
     let mut artifacts = BTreeMap::<PathBuf, String>::new();
@@ -365,10 +401,10 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             .into_iter()
             .map(|path| group_relative_path(path, root_identity.as_str()))
             .collect::<Vec<_>>();
-        let sources =
+        let mut sources =
             collect_sources_with_options(&group_root, &requested, group.settings.source_selection)
                 .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?;
-        if sources.is_empty() {
+        if sources.is_empty() && !cli.changed && cli.changed_since.is_none() {
             return Err(group_failure(
                 &group.name,
                 "configuration: source selection produced no TypeScript files".to_string(),
@@ -403,6 +439,10 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
                     &[],
                 ));
             }
+        }
+
+        if let Some(paths) = &changed_paths {
+            sources.retain(|source| paths.contains(&group_root.join(source.path.as_str())));
         }
 
         let configured_artifact = group
@@ -441,13 +481,24 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
         let threshold = group.settings.threshold.unwrap_or(DEFAULT_THRESHOLD);
         let policy = group_policy(&group.settings, threshold, root_identity.as_str())
             .map_err(|error| group_failure(&group.name, error, &[]))?;
-        let adapter = if command.is_none() {
+        let adapter = if sources.is_empty() {
+            Some(
+                make_coverage_adapter_with_metric(
+                    CoverageFormat::Istanbul,
+                    "{}",
+                    &group_root,
+                    group.settings.coverage_metric.unwrap_or_default(),
+                )
+                .map_err(|error| group_failure(&group.name, error.to_string(), &[]))?,
+            )
+        } else if command.is_none() {
             let coverage = read_group_artifact(&group_root, &artifact)
                 .map_err(|error| group_failure(&group.name, error, &[]))?;
-            let adapter = make_coverage_adapter(
+            let adapter = make_coverage_adapter_with_metric(
                 group.settings.coverage_format.unwrap_or_default(),
                 &coverage,
                 &group_root,
+                group.settings.coverage_metric.unwrap_or_default(),
             )
             .map_err(|error| {
                 group_failure(
@@ -467,6 +518,7 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             sources,
             artifact,
             coverage_format: group.settings.coverage_format.unwrap_or_default(),
+            coverage_metric: group.settings.coverage_metric.unwrap_or_default(),
             command,
             policy,
             report_only: group.settings.report_only.unwrap_or(false),
@@ -482,15 +534,19 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
         } else {
             let coverage = acquire_group_coverage(&group)
                 .map_err(|error| group_failure(group.name.as_str(), error, &[]))?;
-            make_coverage_adapter(group.coverage_format, &coverage, &group.root).map_err(
-                |error| {
-                    group_failure(
-                        group.name.as_str(),
-                        error.to_string(),
-                        &qualified_diagnostics(group.name.as_str(), error.diagnostics()),
-                    )
-                },
-            )?
+            make_coverage_adapter_with_metric(
+                group.coverage_format,
+                &coverage,
+                &group.root,
+                group.coverage_metric,
+            )
+            .map_err(|error| {
+                group_failure(
+                    group.name.as_str(),
+                    error.to_string(),
+                    &qualified_diagnostics(group.name.as_str(), error.diagnostics()),
+                )
+            })?
         };
         let report = analyze_with_adapter_and_policy(
             &group.sources,
@@ -541,6 +597,7 @@ fn reject_multi_group_cli_overrides(cli: &Cli) -> Result<(), CliFailure> {
     let has_sources = !cli.source_paths.is_empty() || !cli.source_options.is_empty();
     if cli.coverage.is_some()
         || cli.coverage_format.is_some()
+        || cli.coverage_metric.is_some()
         || cli.coverage_command.is_some()
         || !cli.coverage_args.is_empty()
         || cli.generate

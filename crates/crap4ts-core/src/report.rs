@@ -36,7 +36,22 @@ pub fn render_text(report: &Report) -> String {
             row.range.start.line, row.range.start.column, row.range.end.line, row.range.end.column
         );
         let coverage = match &row.coverage {
-            Coverage::Measured { fraction, .. } => format!("{:.2}%", fraction * 100.0),
+            Coverage::Measured {
+                fraction, basis, ..
+            } => {
+                let label = basis.map_or_else(String::new, |basis| {
+                    format!(
+                        " ({})",
+                        match basis {
+                            crate::CoverageBasis::Branch => "branch",
+                            crate::CoverageBasis::Line => "line fallback",
+                            crate::CoverageBasis::Statement => "statement fallback",
+                            crate::CoverageBasis::Function => "function fallback",
+                        }
+                    )
+                });
+                format!("{:.2}%{label}", fraction * 100.0)
+            }
             Coverage::Unknown { reason } => format!("unknown ({reason})"),
         };
         let score = row
@@ -52,7 +67,7 @@ pub fn render_text(report: &Report) -> String {
             row.path,
             range,
             row.kind.as_label(),
-            row.name,
+            row.label.as_deref().unwrap_or(&row.name),
             row.complexity.get(),
             coverage,
             score

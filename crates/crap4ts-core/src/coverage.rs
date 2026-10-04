@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::domain::{
-    CoreError, Coverage, Diagnostic, DiagnosticCategory, FunctionUnit, ProjectRelativePath,
-    SourceFile, SourcePosition, SourceRange,
+    CoreError, Coverage, CoverageBasis, Diagnostic, DiagnosticCategory, FunctionUnit,
+    ProjectRelativePath, SourceFile, SourcePosition, SourceRange,
 };
 
 mod lcov;
@@ -58,9 +58,30 @@ impl std::fmt::Display for CoverageFormat {
     }
 }
 
+/// Preserve legacy scoring or prefer branches with explicitly reported fallback.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageMetric {
+    #[default]
+    Legacy,
+    Branch,
+}
+
+impl FromStr for CoverageMetric {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacy" => Ok(Self::Legacy),
+            "branch" => Ok(Self::Branch),
+            _ => Err("coverage metric must be legacy or branch".to_string()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IstanbulCoverage {
     files: BTreeMap<ProjectRelativePath, IstanbulFile>,
+    metric: CoverageMetric,
 }
 
 /// Normalized coverage boundary consumed by scoring.
@@ -69,6 +90,10 @@ pub(crate) struct IstanbulCoverage {
 /// only library-neutral domain values. The application never branches on the
 /// concrete report format after construction.
 pub trait CoverageAdapter {
+    fn uses_branch_metric(&self) -> bool {
+        false
+    }
+
     fn validate_for_source(
         &self,
         path: &ProjectRelativePath,
@@ -116,9 +141,27 @@ pub fn make_coverage_adapter(
     input: &str,
     root: &Path,
 ) -> Result<Box<dyn CoverageAdapter>, CoreError> {
+    make_coverage_adapter_with_metric(format, input, root, CoverageMetric::Legacy)
+}
+
+pub fn make_coverage_adapter_with_metric(
+    format: CoverageFormat,
+    input: &str,
+    root: &Path,
+    metric: CoverageMetric,
+) -> Result<Box<dyn CoverageAdapter>, CoreError> {
     match format {
-        CoverageFormat::Istanbul => Ok(Box::new(IstanbulCoverage::parse(input, root)?)),
-        CoverageFormat::Lcov => Ok(Box::new(lcov::LcovCoverage::parse(input, root)?)),
+        CoverageFormat::Istanbul => {
+            let mut coverage = IstanbulCoverage::parse(input, root)?;
+            coverage.metric = metric;
+            for file in coverage.files.values_mut() {
+                file.metric = metric;
+            }
+            Ok(Box::new(coverage))
+        }
+        CoverageFormat::Lcov => Ok(Box::new(lcov::LcovCoverage::parse_with_metric(
+            input, root, metric,
+        )?)),
     }
 }
 
@@ -135,6 +178,8 @@ pub fn coverage_adapter(
 struct IstanbulFile {
     function_entries: Vec<IstanbulFunction>,
     statement_entries: Vec<IstanbulStatement>,
+    branch_entries: Vec<IstanbulBranch>,
+    metric: CoverageMetric,
 }
 
 #[derive(Debug)]
@@ -153,6 +198,14 @@ struct IstanbulStatement {
     hits: u64,
 }
 
+#[derive(Debug)]
+struct IstanbulBranch {
+    id: String,
+    range: IstanbulRange,
+    locations: Vec<Option<IstanbulRange>>,
+    hits: Vec<u64>,
+}
+
 /// The result of joining one Istanbul file to the normalized source units.
 ///
 /// Entries are indexed by their position in the parsed Istanbul maps and hold
@@ -163,6 +216,8 @@ struct IstanbulStatement {
 struct IstanbulAttribution {
     function_owners: Vec<Option<usize>>,
     statement_owners: Vec<Option<usize>>,
+    branch_owners: Vec<Option<usize>>,
+    blocked_branches: std::collections::BTreeSet<usize>,
 }
 
 /// Istanbul line/column positions use JavaScript UTF-16 code-unit columns.
@@ -211,10 +266,15 @@ impl IstanbulCoverage {
             let file = IstanbulFile {
                 function_entries: parse_functions(object)?,
                 statement_entries: parse_statements(object)?,
+                branch_entries: parse_branches(object)?,
+                metric: CoverageMetric::Legacy,
             };
             normalized.insert(identity, file);
         }
-        Ok(Self { files: normalized })
+        Ok(Self {
+            files: normalized,
+            metric: CoverageMetric::Legacy,
+        })
     }
 
     pub(crate) fn validate_for_source(
@@ -279,6 +339,10 @@ impl IstanbulCoverage {
 }
 
 impl CoverageAdapter for IstanbulCoverage {
+    fn uses_branch_metric(&self) -> bool {
+        self.metric == CoverageMetric::Branch
+    }
+
     fn validate_for_source(
         &self,
         path: &ProjectRelativePath,
@@ -339,6 +403,12 @@ impl IstanbulFile {
         }
         for statement in &self.statement_entries {
             source_range_from_istanbul(statement.range, source)?;
+        }
+        for branch in &self.branch_entries {
+            source_range_from_istanbul(branch.range, source)?;
+            for location in branch.locations.iter().flatten() {
+                source_range_from_istanbul(*location, source)?;
+            }
         }
         Ok(())
     }
@@ -508,10 +578,36 @@ impl IstanbulFile {
             statement_owners[statement_index] = Some(owner);
         }
 
+        let mut branch_owners = vec![None; self.branch_entries.len()];
+        let mut blocked_branches = std::collections::BTreeSet::new();
+        if self.metric == CoverageMetric::Branch {
+            for (index, branch) in self.branch_entries.iter().enumerate() {
+                let range = source_range_from_istanbul(branch.range, source)?;
+                let candidates = source_units
+                    .iter()
+                    .filter_map(|(index, unit)| range_contains(unit.range, range).then_some(*index))
+                    .collect::<Vec<_>>();
+                let owner = most_specific_statement_owner(&candidates, units)?;
+                if let Some(owner) = owner.filter(|owner| unit_functions.contains_key(owner)) {
+                    branch_owners[index] = Some(owner);
+                } else {
+                    blocked_branches.extend(source_units.iter().filter_map(|(index, unit)| {
+                        (range.start.offset < unit.range.end.offset
+                            && unit.range.start.offset < range.end.offset)
+                            .then_some(*index)
+                    }));
+                    diagnostics.push(Diagnostic::new(DiagnosticCategory::CoverageAttribution,
+                        format!("unmatched Istanbul branch '{}' in '{path}' has no compatible source function", branch.id)));
+                }
+            }
+        }
+
         Ok((
             IstanbulAttribution {
                 function_owners,
                 statement_owners,
+                branch_owners,
+                blocked_branches,
             },
             diagnostics,
         ))
@@ -541,6 +637,25 @@ impl IstanbulFile {
         unit_index: usize,
         attribution: &IstanbulAttribution,
     ) -> Result<Option<Coverage>, CoreError> {
+        if self.metric == CoverageMetric::Branch {
+            if attribution.blocked_branches.contains(&unit_index) {
+                return Ok(None);
+            }
+            let hits = attribution
+                .branch_owners
+                .iter()
+                .zip(&self.branch_entries)
+                .filter(|(owner, _)| **owner == Some(unit_index))
+                .flat_map(|(_, branch)| branch.hits.iter())
+                .collect::<Vec<_>>();
+            if !hits.is_empty() {
+                return Coverage::measured(
+                    hits.iter().filter(|hit| ***hit > 0).count() as u64,
+                    hits.len() as u64,
+                )
+                .map(|coverage| Some(coverage.with_basis(CoverageBasis::Branch)));
+            }
+        }
         let owned = attribution
             .statement_owners
             .iter()
@@ -550,7 +665,13 @@ impl IstanbulFile {
         if !owned.is_empty() {
             let total = owned.len() as u64;
             let covered = owned.iter().filter(|hits| **hits > 0).count() as u64;
-            return Coverage::measured(covered, total).map(Some);
+            return Coverage::measured(covered, total).map(|coverage| {
+                Some(if self.metric == CoverageMetric::Branch {
+                    coverage.with_basis(CoverageBasis::Statement)
+                } else {
+                    coverage
+                })
+            });
         }
         let function = attribution
             .function_owners
@@ -559,7 +680,14 @@ impl IstanbulFile {
             .find_map(|(index, owner)| (*owner == Some(unit_index)).then_some(index));
         Ok(function
             .and_then(|index| self.function_entries[index].hits)
-            .and_then(|hits| Coverage::measured(u64::from(hits > 0), 1).ok()))
+            .and_then(|hits| Coverage::measured(u64::from(hits > 0), 1).ok())
+            .map(|coverage| {
+                if self.metric == CoverageMetric::Branch {
+                    coverage.with_basis(CoverageBasis::Function)
+                } else {
+                    coverage
+                }
+            }))
     }
 }
 
@@ -836,6 +964,84 @@ fn parse_count_object(value: &Value, label: &str) -> Result<BTreeMap<String, u64
         counts.insert(id.clone(), count);
     }
     Ok(counts)
+}
+
+// Istanbul represents the implicit else of an if without an else with
+// empty positions. Its outcome still belongs to the decision's explicit loc.
+fn parse_branch_location(value: &Value) -> Result<Option<IstanbulRange>, CoreError> {
+    let empty = |key| {
+        value
+            .get(key)
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+    };
+    if empty("start") && empty("end") {
+        return Ok(None);
+    }
+    parse_range(value, "branch location").map(Some)
+}
+
+fn parse_branches(object: &Map<String, Value>) -> Result<Vec<IstanbulBranch>, CoreError> {
+    let Some(map) = object.get("branchMap") else {
+        if object
+            .get("b")
+            .and_then(Value::as_object)
+            .is_some_and(|map| !map.is_empty())
+        {
+            return Err(CoreError::CoverageParsing(
+                "b has counts without branchMap".to_string(),
+            ));
+        }
+        return Ok(Vec::new());
+    };
+    let map = map
+        .as_object()
+        .ok_or_else(|| CoreError::CoverageParsing("branchMap must be an object".to_string()))?;
+    let counts = object.get("b").and_then(Value::as_object);
+    let mut branches = Vec::new();
+    for (id, entry) in map {
+        let range = parse_range(
+            entry
+                .get("loc")
+                .ok_or_else(|| CoreError::CoverageParsing(format!("branch '{id}' has no loc")))?,
+            "branch",
+        )?;
+        let locations = entry
+            .get("locations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CoreError::CoverageParsing(format!("branch '{id}' has no locations")))?
+            .iter()
+            .map(parse_branch_location)
+            .collect::<Result<Vec<_>, _>>()?;
+        let hits = counts
+            .and_then(|map| map.get(id))
+            .and_then(Value::as_array)
+            .ok_or_else(|| CoreError::CoverageParsing(format!("branch '{id}' has no counts")))?
+            .iter()
+            .map(|value| {
+                value.as_u64().ok_or_else(|| {
+                    CoreError::CoverageParsing(format!("branch '{id}' has invalid count"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if hits.is_empty() || hits.len() != locations.len() {
+            return Err(CoreError::CoverageParsing(format!(
+                "branch '{id}' count length does not match locations"
+            )));
+        }
+        branches.push(IstanbulBranch {
+            id: id.clone(),
+            range,
+            locations,
+            hits,
+        });
+    }
+    if counts.is_some_and(|counts| counts.keys().any(|id| !map.contains_key(id))) {
+        return Err(CoreError::CoverageParsing(
+            "b contains an unknown branch id".to_string(),
+        ));
+    }
+    Ok(branches)
 }
 
 fn validate_branch_counts(object: &Map<String, Value>) -> Result<(), CoreError> {

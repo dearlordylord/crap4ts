@@ -12,7 +12,9 @@ use std::{
 };
 
 use clap::ValueEnum;
-use crap4ts_core::{CoverageFormat, ProjectRelativePath, SourceSelectionOptions, ThresholdPolicy};
+use crap4ts_core::{
+    CoverageFormat, CoverageMetric, ProjectRelativePath, SourceSelectionOptions, ThresholdPolicy,
+};
 use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
@@ -178,6 +180,8 @@ struct CoverageDetails {
     #[serde(default, deserialize_with = "reject_null")]
     format: Option<CoverageFormat>,
     #[serde(default, deserialize_with = "reject_null")]
+    metric: Option<CoverageMetric>,
+    #[serde(default, deserialize_with = "reject_null")]
     command: Option<CommandSpec>,
 }
 
@@ -188,16 +192,22 @@ enum CoverageConfig {
     Details(CoverageDetails),
 }
 
-type CoverageParts = (PathBuf, Option<CoverageFormat>, Option<Vec<String>>);
+type CoverageParts = (
+    PathBuf,
+    Option<CoverageFormat>,
+    Option<Vec<String>>,
+    Option<CoverageMetric>,
+);
 
 impl CoverageConfig {
     fn into_parts(self) -> Result<CoverageParts, String> {
         match self {
-            Self::Path(path) => Ok((path, None, None)),
+            Self::Path(path) => Ok((path, None, None, None)),
             Self::Details(details) => Ok((
                 details.path,
                 details.format,
                 details.command.map(CommandSpec::into_argv).transpose()?,
+                details.metric,
             )),
         }
     }
@@ -354,6 +364,8 @@ struct SettingsConfig {
         deserialize_with = "reject_null"
     )]
     coverage_format: Option<CoverageFormat>,
+    #[serde(default, deserialize_with = "reject_null")]
+    coverage_metric: Option<CoverageMetric>,
     #[serde(
         default,
         alias = "coverageCommand",
@@ -484,6 +496,7 @@ pub(crate) struct ConfigValues {
     pub(crate) source_selection: SourceSelectionOptions,
     pub(crate) coverage: Option<PathBuf>,
     pub(crate) coverage_format: Option<CoverageFormat>,
+    pub(crate) coverage_metric: Option<CoverageMetric>,
     pub(crate) coverage_command: Option<Vec<String>>,
     pub(crate) format: Option<OutputFormat>,
     pub(crate) json: Option<bool>,
@@ -513,14 +526,18 @@ impl SettingsConfig {
             (None, None, None) => None,
         };
 
-        let (coverage, coverage_format_from_coverage, coverage_command_from_coverage) =
-            match self.coverage {
-                Some(coverage) => {
-                    let (path, format, command) = coverage.into_parts()?;
-                    (Some(path), format, command)
-                }
-                None => (None, None, None),
-            };
+        let (
+            coverage,
+            coverage_format_from_coverage,
+            coverage_command_from_coverage,
+            metric_from_coverage,
+        ) = match self.coverage {
+            Some(coverage) => {
+                let (path, format, command, metric) = coverage.into_parts()?;
+                (Some(path), format, command, metric)
+            }
+            None => (None, None, None, None),
+        };
         if coverage.is_some() && self.coverage_file.is_some() {
             return Err("coverage and coverage_file are mutually exclusive".to_string());
         }
@@ -532,6 +549,11 @@ impl SettingsConfig {
             (Some(format), None) | (None, Some(format)) => Some(format),
             (None, None) => None,
         };
+
+        if metric_from_coverage.is_some() && self.coverage_metric.is_some() {
+            return Err("coverage.metric and coverage_metric are mutually exclusive".to_string());
+        }
+        let coverage_metric = metric_from_coverage.or(self.coverage_metric);
 
         let top_level_coverage_command = self
             .coverage_command
@@ -642,6 +664,7 @@ impl SettingsConfig {
             ),
             coverage,
             coverage_format,
+            coverage_metric,
             coverage_command,
             format,
             json,
@@ -668,6 +691,7 @@ impl FileConfig {
             || settings.source_selection != SourceSelectionOptions::default()
             || settings.coverage.is_some()
             || settings.coverage_format.is_some()
+            || settings.coverage_metric.is_some()
             || settings.coverage_command.is_some()
             || settings.threshold.is_some()
             || !settings.threshold_overrides.is_empty()
@@ -727,6 +751,7 @@ impl FileConfig {
             source_selection: SourceSelectionOptions::default(),
             coverage: None,
             coverage_format: None,
+            coverage_metric: None,
             coverage_command: None,
             format: settings.format,
             json: settings.json,

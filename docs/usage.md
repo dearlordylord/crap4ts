@@ -73,6 +73,69 @@ forwarded to stderr, so JSON stdout remains a single report document. Use
 provided directly on the CLI. `--no-generate` selects the existing-artifact
 path even when a command is configured.
 
+## Branch scoring and source labels
+
+`--coverage-metric branch` prefers branch outcomes for each function. Configure
+it as `"coverage_metric": "branch"` or `"coverage": {"path": "...", "metric": "branch"}`.
+The default `legacy` metric keeps Istanbul statement/function coverage and LCOV
+line coverage. An explicit CLI metric overrides the single-project config.
+Each monorepo group can choose its own metric; the CLI metric is rejected with
+groups to avoid implicitly changing every package's scoring policy.
+
+For Istanbul, every hit count in a `b` array is one outcome; the branch's
+`branchMap.loc` assigns the decision to the smallest containing function range,
+including parameter defaults.
+Locations and counts are validated, and nested functions remain independent.
+Istanbul’s empty location for an implicit else is accepted using the decision’s
+explicit location. See the [instrumenter’s location representation](https://github.com/istanbuljs/istanbuljs/blob/master/packages/istanbul-lib-instrument/src/source-coverage.js).
+For LCOV, each unique `BRDA` record is one outcome, covered when `taken > 0`;
+`-` is uncovered. Branch lines use the same conservative ownership rules as
+line coverage. Shared lines remain unknown rather than being assigned twice.
+Branch counts and summaries are validated even in legacy mode.
+
+A function with no attributable branches falls back to legacy evidence. Branch
+mode reports `coverage.basis` as `branch`, `line`, `statement`, or `function`,
+and text reports mark fallback explicitly. Missing or ambiguous evidence
+remains unknown and fails the strict gate. A partial branch report measures
+only the outcomes it supplies, so configure instrumentation to include all
+selected source files. Branch scoring can increase CRAP scores even when line
+coverage is 100%; review thresholds when enabling it.
+
+Cyclomatic complexity counts each optional-chain segment (`?.`, `?.[]`, and
+`?.()`) in a function body as one decision. Nested function decisions belong
+to their own rows. This applies to both metrics and can increase existing
+scores; `??` and logical assignments already count as decisions.
+
+Inline callbacks on recognized Express app/router instances get a separate
+`label`, such as `GET /users`, `POST /items`, or `USE`. Reports retain the
+original `name`, `id`, ranges, and coverage matching. Multiple callbacks with
+the same label are numbered `#2`, `#3`, etc. in source order. Recognition
+supports Express default/namespace imports, named `Router` imports (including
+aliases), and `const express = require("express")`, followed by direct
+`express()`, `express.Router()`, or `Router()` instances. Chained
+`.route("/path").get(...)` calls and static template paths are supported.
+Shadowed or reassigned identifiers keep their ordinary names; arbitrary
+`.get()` methods are not treated as routes. Dynamic paths produce method-only
+labels. Named handler references retain their function's ordinary row.
+
+## Changed-file selection
+
+Use `--changed` for staged, unstaged, and untracked files, or
+`--changed-since REF` for files differing from a commit (including current
+working-tree changes and untracked files). For a PR comparison, pass the merge
+base explicitly, for example `--changed-since "$(git merge-base main HEAD)"`.
+These flags are mutually exclusive and require Git and a valid repository;
+invalid refs fail with status 1.
+
+Selection intersects Git paths with your configured source roots and filters.
+It analyzes whole functions in the selected files, rather than just changed
+lines. Deleted files and excluded tests are omitted. Package groups retain
+their independent settings and identities. An empty changed-file selection
+passes with an empty report and skips coverage generation, leaving artifacts
+intact. Coverage is still required for selected functions, and the same strict
+missing-evidence and threshold rules apply. This focused gate complements the
+full-project gate; run the full gate in CI when you need whole-project coverage.
+
 ## Agent workflow recipe
 
 Use crap4ts as a deterministic feedback step after a coding agent changes
@@ -202,7 +265,7 @@ effective global or path threshold. `--config PATH` selects a configuration
 explicitly; its file must remain inside `--project-root`.
 
 Both formats normalize coverage to the same measured-or-unknown model. For
-LCOV, each `DA:<line>,<hits>` record is one denominator unit and a line is a
+legacy LCOV scoring, each `DA:<line>,<hits>` record is one denominator unit and a line is a
 numerator unit when its hit count is greater than zero. Thus `DA` records with
 zero hits are measured zero coverage, while a function with no attributable
 `DA` records remains unknown. LCOV has line locations but no columns or
@@ -214,9 +277,9 @@ LCOV parsing is strict: the supported tracefile records are `TN`, `SF`,
 `FN`, `FNDA`, `FNF`, `FNH`, `DA`, `LF`, `LH`, `BRDA`, `BRF`, `BRH`, and
 `end_of_record`. Unknown or malformed records fail as coverage-parsing
 errors. Function and line summaries are checked against their records. Branch
-records are syntax-validated and intentionally ignored for attribution; their
-locations are not used to invent columns or function end ranges. Attribution
-is based on `DA` lines only.
+records are validated, including duplicate identities and summaries. Legacy
+scoring uses `DA` lines only; branch mode uses `BRDA` outcomes when available.
+Neither mode invents columns or function end ranges.
 
 Exit status `0` means the quality gate passed, `1` means invalid input or
 analysis failure, and `2` means a score strictly exceeded the configured
@@ -240,10 +303,14 @@ guesses are rejected.
 ## Reports
 
 Text reports are intended for terminals. JSON stdout is deterministic and
-contains no timestamps or child-process noise. Single-project reports use
-[schema v1](../schemas/report-v1.schema.json); package-group reports use
-[schema v2](../schemas/report-v2.schema.json), with each row qualified by its
-group. `npm run check:schemas` validates both supported shapes.
+contains no timestamps or child-process noise. Legacy single-project reports use
+[schema v1](../schemas/report-v1.schema.json); legacy package-group reports use
+[schema v2](../schemas/report-v2.schema.json). Reports using branch mode or route
+labels use [schema v3](../schemas/report-v3.schema.json) for single projects or
+[schema v4](../schemas/report-v4.schema.json) for package groups. These extend
+the legacy shapes with optional row `label` and measured `coverage.basis`
+fields. Every aggregate row is qualified by its group. `npm run check:schemas`
+validates all four supported shapes.
 
 The process exits with `0` when analysis completes within policy, `1` for
 invalid input, configuration, parsing, execution, or missing-evidence errors,

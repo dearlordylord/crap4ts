@@ -10,6 +10,9 @@ use thiserror::Error;
 pub const REPORT_VERSION: u32 = 1;
 /// Version of the aggregate package-group JSON report document.
 pub const AGGREGATE_REPORT_VERSION: u32 = REPORT_VERSION + 1;
+/// Reports exposing branch basis or route display labels.
+pub const EXTENDED_REPORT_VERSION: u32 = 3;
+pub const EXTENDED_AGGREGATE_REPORT_VERSION: u32 = 4;
 
 /// A validated project-relative path. Absolute paths, parent traversal, and
 /// platform-specific drive prefixes are rejected at this boundary.
@@ -292,6 +295,16 @@ impl<'de> Deserialize<'de> for Complexity {
     }
 }
 
+/// The evidence actually used for a branch-mode score, including fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageBasis {
+    Branch,
+    Line,
+    Statement,
+    Function,
+}
+
 /// Measured coverage, or explicit unavailable evidence.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -300,6 +313,8 @@ pub enum Coverage {
         covered: u64,
         total: u64,
         fraction: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        basis: Option<CoverageBasis>,
     },
     Unknown {
         reason: String,
@@ -315,7 +330,15 @@ impl Coverage {
             covered,
             total,
             fraction: covered as f64 / total as f64,
+            basis: None,
         })
+    }
+
+    pub fn with_basis(mut self, basis: CoverageBasis) -> Self {
+        if let Self::Measured { basis: slot, .. } = &mut self {
+            *slot = Some(basis);
+        }
+        self
     }
 
     pub fn unknown(reason: impl Into<String>) -> Self {
@@ -338,6 +361,8 @@ pub struct FunctionUnit {
     pub id: String,
     pub path: ProjectRelativePath,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub kind: FunctionKind,
     pub range: SourceRange,
     pub body_range: SourceRange,
@@ -354,6 +379,8 @@ pub struct ReportRow {
     pub group: Option<String>,
     pub path: ProjectRelativePath,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub kind: FunctionKind,
     pub range: SourceRange,
     /// Internal body boundary used by coverage attribution. The public report
