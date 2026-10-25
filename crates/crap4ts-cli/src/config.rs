@@ -183,6 +183,8 @@ struct CoverageDetails {
     metric: Option<CoverageMetric>,
     #[serde(default, deserialize_with = "reject_null")]
     command: Option<CommandSpec>,
+    #[serde(default, deserialize_with = "reject_null")]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,17 +199,19 @@ type CoverageParts = (
     Option<CoverageFormat>,
     Option<Vec<String>>,
     Option<CoverageMetric>,
+    Option<u64>,
 );
 
 impl CoverageConfig {
     fn into_parts(self) -> Result<CoverageParts, String> {
         match self {
-            Self::Path(path) => Ok((path, None, None, None)),
+            Self::Path(path) => Ok((path, None, None, None, None)),
             Self::Details(details) => Ok((
                 details.path,
                 details.format,
                 details.command.map(CommandSpec::into_argv).transpose()?,
                 details.metric,
+                details.timeout_ms,
             )),
         }
     }
@@ -498,6 +502,7 @@ pub(crate) struct ConfigValues {
     pub(crate) coverage_format: Option<CoverageFormat>,
     pub(crate) coverage_metric: Option<CoverageMetric>,
     pub(crate) coverage_command: Option<Vec<String>>,
+    pub(crate) coverage_timeout_ms: Option<u64>,
     pub(crate) format: Option<OutputFormat>,
     pub(crate) json: Option<bool>,
     pub(crate) threshold: Option<u32>,
@@ -531,12 +536,13 @@ impl SettingsConfig {
             coverage_format_from_coverage,
             coverage_command_from_coverage,
             metric_from_coverage,
+            coverage_timeout_ms,
         ) = match self.coverage {
             Some(coverage) => {
-                let (path, format, command, metric) = coverage.into_parts()?;
-                (Some(path), format, command, metric)
+                let (path, format, command, metric, timeout) = coverage.into_parts()?;
+                (Some(path), format, command, metric, timeout)
             }
-            None => (None, None, None, None),
+            None => (None, None, None, None, None),
         };
         if coverage.is_some() && self.coverage_file.is_some() {
             return Err("coverage and coverage_file are mutually exclusive".to_string());
@@ -666,6 +672,7 @@ impl SettingsConfig {
             coverage_format,
             coverage_metric,
             coverage_command,
+            coverage_timeout_ms,
             format,
             json,
             threshold,
@@ -693,6 +700,7 @@ impl FileConfig {
             || settings.coverage_format.is_some()
             || settings.coverage_metric.is_some()
             || settings.coverage_command.is_some()
+            || settings.coverage_timeout_ms.is_some()
             || settings.threshold.is_some()
             || !settings.threshold_overrides.is_empty()
             || settings.report_only.is_some()
@@ -753,6 +761,7 @@ impl FileConfig {
             coverage_format: None,
             coverage_metric: None,
             coverage_command: None,
+            coverage_timeout_ms: None,
             format: settings.format,
             json: settings.json,
             threshold: None,

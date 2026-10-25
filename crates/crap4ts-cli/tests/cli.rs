@@ -1989,3 +1989,204 @@ fn changed_file_aliases_match_the_source_discoverys_canonical_identity() {
     assert_eq!(report["rows"].as_array().unwrap().len(), 1);
     assert_eq!(report["rows"][0]["path"], "src/fixture.ts");
 }
+
+// Reuse the test executable as a native coverage runner on every supported OS.
+#[test]
+fn timeout_probe_worker() {
+    let Ok(mode) = std::env::var("CRAP4TS_TIMEOUT_PROBE_MODE") else {
+        return;
+    };
+    if mode == "descendant" {
+        fs::write("worker-ready", b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        fs::write("worker-leaked", b"still alive").unwrap();
+        return;
+    }
+    if mode == "success" {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::copy("coverage-template.json", "coverage-final.json").unwrap();
+        return;
+    }
+    fs::write("coverage-final.json", b"partial").unwrap();
+    let mut worker = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "timeout_probe_worker", "--nocapture"])
+        .env("CRAP4TS_TIMEOUT_PROBE_MODE", "descendant")
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    while !std::path::Path::new("worker-ready").exists() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if mode == "exited-parent" {
+        std::process::exit(0);
+    }
+    worker.wait().unwrap();
+}
+
+fn timeout_probe_config(fixture: &Fixture, timeout: Value) {
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&json!({
+            "sources": ["src"],
+            "format": "json",
+            "coverage": {
+                "path": "coverage-final.json",
+                "timeout_ms": timeout,
+                "command": [std::env::current_exe().unwrap(), "--exact", "timeout_probe_worker", "--nocapture"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn bounded_probe(mut command: Command) -> std::process::Output {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(8) {
+            child.kill().unwrap();
+            panic!("coverage timeout did not return within watchdog limit");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn coverage_timeout_kills_workers_even_after_parent_exit_and_rejects_partial_artifact() {
+    for mode in ["running-parent", "exited-parent"] {
+        let fixture = Fixture::new();
+        timeout_probe_config(&fixture, json!(700));
+        let mut command = Command::new(binary());
+        command
+            .current_dir(&fixture.root)
+            .env("CRAP4TS_TIMEOUT_PROBE_MODE", mode);
+        let output = bounded_probe(command);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("timed out after 700 ms"), "{stderr}");
+        assert!(
+            fixture.root.join("worker-ready").exists(),
+            "worker must start before timeout"
+        );
+        assert_eq!(
+            fs::read(fixture.root.join("coverage-final.json")).unwrap(),
+            b"partial"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        assert!(
+            !fixture.root.join("worker-leaked").exists(),
+            "descendant survived timeout in {mode}"
+        );
+    }
+}
+
+#[test]
+fn coverage_timeout_cli_override_and_disabled_deadline_allow_success() {
+    let fixture = Fixture::new();
+    fs::copy(
+        fixture.root.join("coverage-final.json"),
+        fixture.root.join("coverage-template.json"),
+    )
+    .unwrap();
+    timeout_probe_config(&fixture, json!(1));
+    for timeout in ["0", "3000"] {
+        let mut command = Command::new(binary());
+        command
+            .current_dir(&fixture.root)
+            .env("CRAP4TS_TIMEOUT_PROBE_MODE", "success")
+            .args(["--coverage-timeout-ms", timeout]);
+        let output = bounded_probe(command);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(serde_json::from_slice::<Value>(&output.stdout).is_ok());
+    }
+}
+
+#[test]
+fn invalid_coverage_timeout_does_not_remove_existing_artifact() {
+    for timeout in [
+        json!(-1),
+        json!(1.5),
+        json!(null),
+        json!("700"),
+        json!(true),
+    ] {
+        let fixture = Fixture::new();
+        let original = fs::read(fixture.root.join("coverage-final.json")).unwrap();
+        timeout_probe_config(&fixture, timeout);
+        let output = Command::new(binary())
+            .current_dir(&fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            fs::read(fixture.root.join("coverage-final.json")).unwrap(),
+            original
+        );
+    }
+    let fixture = Fixture::new();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--coverage-timeout-ms", "-1"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(fixture.root.join("coverage-final.json").exists());
+}
+
+#[test]
+fn group_timeout_is_local_and_failure_never_emits_partial_aggregate() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.root.join("second")).unwrap();
+    fs::write(
+        fixture.root.join("second/other.ts"),
+        "function other() { return 1; }",
+    )
+    .unwrap();
+    timeout_probe_config(&fixture, json!(1));
+    let single: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("crap4ts.json")).unwrap()).unwrap();
+    let config = json!({"format":"json", "groups": {
+        "a-existing": {"sources":["src"], "coverage":"coverage-final.json"},
+        "b-generated": {"sources":["second"], "coverage": {
+            "path":"other-coverage.json", "timeout_ms":1,
+            "command":single["coverage"]["command"]
+        }}
+    }});
+    fs::write(
+        fixture.root.join("crap4ts.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let mut command = Command::new(binary());
+    command
+        .current_dir(&fixture.root)
+        .env("CRAP4TS_TIMEOUT_PROBE_MODE", "success");
+    let output = bounded_probe(command);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("b-generated") && stderr.contains("timed out"),
+        "{stderr}"
+    );
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .args(["--coverage-timeout-ms", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("single-project analysis flags"));
+}

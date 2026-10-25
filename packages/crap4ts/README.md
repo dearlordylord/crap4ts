@@ -34,6 +34,9 @@ npx crap4ts --coverage coverage/coverage-final.json src --coverage-metric branch
 npx crap4ts --coverage coverage/coverage-final.json src --changed-since main
 ```
 
+Run coverage once with the [Vitest/Jest recipes](https://github.com/dearlordylord/crap4ts/blob/master/docs/usage.md#vitest-and-jest-one-test-run).
+Generated commands have a configurable [five-minute timeout](https://github.com/dearlordylord/crap4ts/blob/master/docs/usage.md#coverage-command-timeout).
+
 ## Using crap4ts in an agent workflow
 
 Give a coding agent concrete feedback on complex, poorly tested functions:

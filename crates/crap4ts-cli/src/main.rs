@@ -78,6 +78,10 @@ struct Cli {
     )]
     coverage_args: Vec<OsString>,
 
+    /// Coverage command deadline in milliseconds (default 300000; 0 disables).
+    #[arg(long = "coverage-timeout-ms", value_name = "MS")]
+    coverage_timeout_ms: Option<u64>,
+
     /// Require a configured coverage command to run before analysis.
     #[arg(long = "generate", conflicts_with = "no_generate")]
     generate: bool,
@@ -298,7 +302,15 @@ fn execute_single(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
     let coverage = if sources.is_empty() {
         String::new()
     } else if let Some(command) = command {
-        generation::generate(root, &coverage, &command).map_err(CliFailure::from)?
+        generation::generate(
+            root,
+            &coverage,
+            &command,
+            cli.coverage_timeout_ms
+                .or(values.coverage_timeout_ms)
+                .unwrap_or(generation::DEFAULT_TIMEOUT_MS),
+        )
+        .map_err(CliFailure::from)?
     } else {
         let coverage_path = if coverage.is_absolute() {
             coverage
@@ -363,6 +375,7 @@ struct ResolvedPackageGroup {
     coverage_format: CoverageFormat,
     coverage_metric: CoverageMetric,
     command: Option<Vec<String>>,
+    timeout_ms: u64,
     policy: ThresholdPolicy,
     report_only: bool,
     /// Existing artifacts are parsed during preflight and retained in memory.
@@ -520,6 +533,10 @@ fn execute_groups(cli: &Cli, root: &Path, values: &ConfigValues) -> Result<i32, 
             coverage_format: group.settings.coverage_format.unwrap_or_default(),
             coverage_metric: group.settings.coverage_metric.unwrap_or_default(),
             command,
+            timeout_ms: group
+                .settings
+                .coverage_timeout_ms
+                .unwrap_or(generation::DEFAULT_TIMEOUT_MS),
             policy,
             report_only: group.settings.report_only.unwrap_or(false),
             adapter,
@@ -599,6 +616,7 @@ fn reject_multi_group_cli_overrides(cli: &Cli) -> Result<(), CliFailure> {
         || cli.coverage_format.is_some()
         || cli.coverage_metric.is_some()
         || cli.coverage_command.is_some()
+        || cli.coverage_timeout_ms.is_some()
         || !cli.coverage_args.is_empty()
         || cli.generate
         || cli.no_generate
@@ -801,7 +819,7 @@ fn read_group_artifact(root: &Path, configured: &Path) -> Result<String, String>
 
 fn acquire_group_coverage(group: &ResolvedPackageGroup) -> Result<String, String> {
     if let Some(command) = &group.command {
-        generation::generate(&group.root, &group.artifact, command)
+        generation::generate(&group.root, &group.artifact, command, group.timeout_ms)
     } else {
         read_group_artifact(&group.root, &group.artifact)
     }

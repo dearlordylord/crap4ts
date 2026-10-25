@@ -13,9 +13,13 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
+use command_group::CommandGroup;
 use serde::Deserialize;
+
+pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 
 /// Declarative command configuration.
 ///
@@ -67,6 +71,7 @@ pub(crate) fn generate(
     root: &Path,
     configured_artifact: &Path,
     argv: &[String],
+    timeout_ms: u64,
 ) -> Result<String, String> {
     validate_command(argv)?;
     let artifact = validate_artifact_path(root, configured_artifact)?;
@@ -76,16 +81,23 @@ pub(crate) fn generate(
     command
         .args(&argv[1..])
         .current_dir(root)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command
+    let mut group = command.group();
+    #[cfg(windows)]
+    group.kill_on_drop(true);
+    let started = Instant::now();
+    let mut child = group
         .spawn()
         .map_err(|error| format!("coverage command failed to start '{}': {error}", argv[0]))?;
     let stdout = child
+        .inner()
         .stdout
         .take()
         .ok_or_else(|| "coverage command stdout pipe was not available".to_string())?;
     let stderr = child
+        .inner()
         .stderr
         .take()
         .ok_or_else(|| "coverage command stderr pipe was not available".to_string())?;
@@ -98,9 +110,52 @@ pub(crate) fn generate(
     let stdout_sink = Arc::clone(&stderr_sink);
     let stdout_thread = thread::spawn(move || stream_output(stdout, stdout_sink));
     let stderr_thread = thread::spawn(move || stream_output(stderr, stderr_sink));
-    let status = child
-        .wait()
-        .map_err(|error| format!("coverage command could not be waited on: {error}"))?;
+    let mut status = None;
+    loop {
+        // Include inherited-pipe draining: the leader may exit before its workers.
+        if timeout_ms != 0 && started.elapsed() >= Duration::from_millis(timeout_ms) {
+            let cleanup = child.kill();
+            let reaped = if cleanup.is_ok() {
+                child.inner().wait()
+            } else {
+                // Still stop the leader if group termination failed; never wait after a failed kill.
+                child.inner().kill().and_then(|()| child.inner().wait())
+            };
+            let mut message = format!(
+                "coverage command '{}' timed out after {timeout_ms} ms",
+                argv[0]
+            );
+            if let Err(error) = cleanup {
+                // A finished group may disappear between the deadline and kill.
+                if error.kind() != io::ErrorKind::NotFound
+                    && error.kind() != io::ErrorKind::InvalidInput
+                {
+                    message.push_str(&format!("; process group cleanup failed: {error}"));
+                }
+            }
+            if let Err(error) = reaped {
+                message.push_str(&format!("; child reap failed: {error}"));
+            }
+            // Do not join a reader blocked on an escaped descendant or stderr consumer.
+            return Err(message);
+        }
+        if status.is_none() {
+            match child.inner().try_wait() {
+                Ok(result) => status = result,
+                Err(error) => {
+                    if child.kill().is_ok() || child.inner().kill().is_ok() {
+                        let _ = child.inner().wait();
+                    }
+                    return Err(format!("coverage command could not be waited on: {error}"));
+                }
+            }
+        }
+        if status.is_some() && stdout_thread.is_finished() && stderr_thread.is_finished() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let status = status.expect("child exit observed");
     let stdout_result = join_stream_thread(stdout_thread);
     let stderr_result = join_stream_thread(stderr_thread);
     if let Err(error) = stdout_result.and(stderr_result) {

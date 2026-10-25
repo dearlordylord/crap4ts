@@ -73,6 +73,95 @@ forwarded to stderr, so JSON stdout remains a single report document. Use
 provided directly on the CLI. `--no-generate` selects the existing-artifact
 path even when a command is configured.
 
+## Coverage command timeout
+
+Generated commands have a 300,000 ms (five minute) deadline. Configure
+`coverage.timeout_ms` or override it with `--coverage-timeout-ms MS`:
+
+```json
+{
+  "sources": ["src"],
+  "coverage": {
+    "path": "coverage/coverage-final.json",
+    "command": ["node", "node_modules/vitest/vitest.mjs", "run", "--coverage"],
+    "timeout_ms": 600000
+  }
+}
+```
+
+`0` disables the deadline; other values must be nonnegative integer milliseconds
+within the unsigned 64-bit range. Each package group owns its timeout; the CLI
+option is rejected with groups. Values are validated before any artifact is
+removed. Existing-artifact mode does not start a command or a timer.
+
+The deadline includes waiting for inherited stdout/stderr pipes after the
+command exits. On timeout, crap4ts forcefully terminates the command's process
+group on Unix or Job Object on Windows, reaps the command, and fails with status
+`1` and a `coverage_command` diagnostic. A partially written artifact is never
+analyzed; an aggregate report is never emitted for a failed group. Generation
+is noninteractive: child stdin is closed. Output continues to stream to stderr
+with bounded buffers and JSON stdout stays clean.
+
+This bounds coverage execution, not source analysis or the whole CI job.
+Deliberately detached Unix processes can escape the process group; a blocked
+consumer of crap4ts stderr can still delay diagnostics. Set an outer CI job
+timeout as appropriate for the complete job.
+
+## Vitest and Jest: one test run
+
+Use your project's existing TypeScript test setup. Configure the runner to
+include every source file selected by crap4ts, including untested files, and to
+write Istanbul JSON. No custom test reporter is required.
+
+For Vitest, add these coverage settings to your existing config (keep the
+coverage provider package at the same version as Vitest):
+
+```ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.ts', 'src/**/*.tsx'],
+      reporter: ['text', 'json'],
+      reportsDirectory: 'coverage',
+    },
+  },
+});
+```
+
+Use the coverage command from the timeout example and run `npx crap4ts`.
+crap4ts removes the old artifact, runs Vitest once, and analyzes the fresh
+`coverage/coverage-final.json`. The same command works through the native CLI
+on Windows without npm `.cmd` shims.
+
+For Jest, merge these settings into your existing TypeScript-capable Jest config:
+
+```js
+module.exports = {
+  collectCoverageFrom: ['src/**/*.ts', 'src/**/*.tsx'],
+  coverageReporters: ['text', 'json'],
+  coverageDirectory: 'coverage',
+};
+```
+
+Use the same crap4ts config, replacing its command with:
+
+```json
+["node", "node_modules/jest/bin/jest.js", "--coverage", "--runInBand"]
+```
+
+A failing test command stops analysis and preserves status `1`; a successful
+test run proceeds to the normal strict coverage/threshold gate. Do not use watch
+mode in a generated command: it does not exit after one run.
+
+If CI already runs coverage, clean the old artifact before that step and run
+`npx crap4ts --no-generate` only after the runner succeeds. This avoids a second
+test invocation even when the crap4ts config contains a command. That separate
+runner step needs its own timeout; existing-artifact mode does not verify that
+the artifact belongs to the current checkout.
+
 ## Branch scoring and source labels
 
 `--coverage-metric branch` prefers branch outcomes for each function. Configure
